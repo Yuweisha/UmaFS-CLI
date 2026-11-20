@@ -39,6 +39,9 @@ internal static class Program
         bool noExt = false;
         bool showMissing = false;
         int scanBudget = 0;
+        string? fetchOut = null, fetchGroup = "DeleteOnLogin";
+        int fetchParallel = 8;
+        bool dryRun = false, noVerify = false;
 
         for (int i = 0; i < args.Length; i++)
         {
@@ -63,6 +66,24 @@ internal static class Program
                     break;
                 case "--show-missing":
                     showMissing = true;
+                    break;
+                case "--out" or "-o":
+                    fetchOut = ++i < args.Length ? args[i] : fetchOut;
+                    break;
+                case "--group" or "-g":
+                    fetchGroup = ++i < args.Length ? args[i] : fetchGroup;
+                    break;
+                case "--all":
+                    fetchGroup = "all";
+                    break;
+                case "-j" or "--parallel":
+                    if (i + 1 < args.Length && int.TryParse(args[i + 1], out var pj)) { fetchParallel = Math.Clamp(pj, 1, 64); i++; }
+                    break;
+                case "--dry-run":
+                    dryRun = true;
+                    break;
+                case "--no-verify":
+                    noVerify = true;
                     break;
                 case "-n" or "--limit":
                     if (i + 1 < args.Length && int.TryParse(args[i + 1], out var nb)) { scanBudget = nb; i++; }
@@ -125,6 +146,7 @@ internal static class Program
             "find" => Find(index, positional.ElementAtOrDefault(1), json),
             "stats" => Stats(index, json),
             "check" => CheckCmd(index, json),
+            "fetch" => FetchCmd(index, fetchOut, fetchGroup, fetchParallel, scanBudget, dryRun, noVerify, json),
             "bundle" => BundleCmd(index, positional.Skip(1).ToList()),
             "locate" => LocateCmd(index, positional.ElementAtOrDefault(1), json, scanBudget),
             "scan" => ScanCmd(index, scanBudget),
@@ -158,6 +180,16 @@ internal static class Program
               stats                 清单统计
               check                 核对清单与本地数据，列出缺失条目及其分组
 
+            下载命令（从云端拉清单，不依赖本地数据完整性）:
+              fetch                 默认下载 DeleteOnLogin 分组
+              fetch --all           下载清单里全部缺失资源
+              fetch -g <分组>       指定分组，如 DownloadLogin / DelayRelease / none
+              fetch -n 100          只处理前 N 条（试跑）
+              fetch -o <目录>       目标目录，默认 %LOCALAPPDATA%\UmaFs\assets
+              fetch --dry-run       只统计不下载
+              fetch -j 16           并发数，默认 8
+              fetch --no-verify     跳过 xxHash64 校验
+
             挂载命令（需要 WinFsp，未安装会用内置安装包自动装）:
               mount -m <盘符>       挂载为只读盘，例如 mount -m U:
                                     Ctrl+C 卸载
@@ -176,6 +208,9 @@ internal static class Program
                   --show-missing    挂载时也列出清单里有、但 dat 里缺数据的条目
               -l, --label <卷标>    挂载卷标，默认 UmaFs
               -n N                  scan/locate 本次最多处理 N 个包
+              -g, --group <名>      fetch 的分组过滤
+              -o, --out <目录>      fetch 的目标目录
+              -j, --parallel <N>    fetch 并发数
 
             游戏目录优先级: -r / UMAFSPATH > 配置文件 > 自动探测。
             首次探测成功后会自动写入 %LOCALAPPDATA%\\UmaFs\\config.json。
@@ -555,6 +590,83 @@ internal static class Program
         Console.WriteLine("说明: DelayRelease 分组通常是尚未发布的资源，服务器上也没有（CDN 返回 NoSuchKey）；");
         Console.WriteLine("      其它分组的缺失多为客户端未下载完整，可在游戏内让它重新校验一次。");
         return 0;
+    }
+
+    // ---------- 下载 ----------
+
+    /// <summary>
+    /// fetch — 从云端拉清单并按分组下载。
+    /// 默认只下 DeleteOnLogin（登录即删、本地永远拿不到的那批），--all 下全部。
+    /// 目标目录缺省为 %LOCALAPPDATA%\UmaFs\assets，不写游戏目录。
+    /// </summary>
+    private static int FetchCmd(AssetIndex index, string? outDir, string group, int parallel, int limit,
+                                bool dryRun, bool noVerify, bool json)
+    {
+        string dest = string.IsNullOrWhiteSpace(outDir)
+            ? Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "UmaFs", "assets")
+            : Path.GetFullPath(outDir);
+
+        Console.WriteLine("读取云端清单…");
+        var rm = RemoteManifest.FetchAsync(Console.WriteLine).GetAwaiter().GetResult();
+        Console.WriteLine($"清单就绪: {rm.Assets.Count} 条（{rm.Failures.Count} 个分清单失败）");
+
+        var selected = rm.Assets
+            .Where(a => RemoteManifest.MatchesGroup(a, group))
+            .ToList();
+        if (limit > 0) selected = selected.Take(limit).ToList();
+
+        // 统计本地已有：优先看目标目录，其次看游戏 dat
+        var present = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        foreach (var f in selected)
+        {
+            string p1 = Path.Combine(dest, f.Hash[..2], f.Hash);
+            string p2 = Path.Combine(index.PersistentRoot, "dat", f.Hash[..2], f.Hash);
+            if (File.Exists(p1)) present.Add(f.Hash);
+            else if (File.Exists(p2)) present.Add(f.Hash);
+        }
+
+        var todo = selected.Where(a => !present.Contains(a.Hash)).ToList();
+        long bytes = todo.Sum(a => a.Size);
+
+        Console.WriteLine($"分组 {group}: {selected.Count} 条，本地已有 {present.Count}，待下载 {todo.Count}（{Human(bytes)}）");
+        Console.WriteLine($"目标目录: {dest}");
+
+        if (json)
+        {
+            Console.WriteLine(System.Text.Json.JsonSerializer.Serialize(new
+            {
+                rootHash = rm.RootHash,
+                group,
+                total = selected.Count,
+                present = present.Count,
+                todo = todo.Count,
+                bytes,
+                manifestFailures = rm.Failures
+            }, JsonOpts));
+        }
+
+        if (dryRun || todo.Count == 0)
+        {
+            if (dryRun) Console.WriteLine("(--dry-run，未下载)");
+            return rm.Failures.Count == 0 ? 0 : 1;
+        }
+
+        Directory.CreateDirectory(dest);
+        var downloader = new AssetDownloader();
+        var sw = System.Diagnostics.Stopwatch.StartNew();
+        var result = downloader.RunAsync(todo, dest, !noVerify, parallel, Console.WriteLine, default)
+            .GetAwaiter().GetResult();
+        sw.Stop();
+
+        Console.WriteLine();
+        Console.WriteLine($"完成: 下载 {result.Downloaded}，跳过 {result.Skipped}，失败 {result.Failed}" +
+                          $"（{Human(result.Bytes)}，{sw.Elapsed.TotalSeconds:F0}s，{parallel} 并发）");
+        if (result.Errors.Count > 0)
+        {
+            Console.WriteLine("失败样本:");
+            foreach (var e in result.Errors.Take(10)) Console.WriteLine($"  {e.Name}: {e.Error}");
+        }
+        return result.Failed == 0 ? 0 : 1;
     }
 
     // ---------- 配置 ----------

@@ -108,6 +108,39 @@ vendor/AssetsTools.NET nesrak1/AssetsTools.NET（MIT），只用其 bundle 解�
   `InstallDir`，需要在首次使用 Fsp 类型前 `SetDllDirectoryW` 指向实际 SxS bin 目录
 - **目录枚举**：`ReadDirectoryEntry` 的 marker 必须对所有条目（含 `.`/`..`）生效，否则大目录会死循环
 
+
+## 下载器（fetch）
+
+不需要完整游戏数据，直接从云端清单拉取。清单流程与 UmaViewer standalone / 游戏客户端一致：
+
+```
+api/MetaC/root  ->  root 清单  ->  平台清单(Windows)  ->  41 个分清单  ->  376,012 条资源
+```
+
+```bash
+umafs fetch                      # 下载 DeleteOnLogin 分组（登录即删、本地永远拿不到）
+umafs fetch --all                # 下载全部缺失资源
+umafs fetch -g DownloadLogin     # 指定分组
+umafs fetch -n 100 --dry-run     # 先看会下多少
+umafs fetch -o D:\uma -j 16      # 指定目录与并发
+```
+
+**CDN 路由**（与游戏一致）：名称带扩展名走 `/dl/resources/Generic`，无扩展名走
+`/dl/resources/Windows/assetbundles`。请求必须带 `UnityPlayer` UA，否则 Akamai 返回 403。
+
+**校验**：清单的 8 字节 checksum 是内容的 **xxHash64 大端**，下载后逐条比对，不符则废弃。
+
+**默认目标** `%LOCALAPPDATA%\UmaFs\assets\<hash前2>\<hash>`，不写入游戏目录（避免破坏安装）。
+
+各分组的实测规模（本机清单）：
+
+| 分组 | 条数 | 说明 |
+|---|---|---|
+| `DownloadLogin` | 273,131 | 登录时下载 |
+| `(none)` | 67,450 | 常驻 |
+| `DeleteOnLogin` | **4,517** | 登录时删除，本地拿不到，7.45 GB |
+| `DelayRelease` | 629 | 未发布，CDN 也返回 404 |
+
 ## 第三方组件
 
 | 组件 | 许可 |
