@@ -83,7 +83,8 @@ U:\_master\master.mdb                   明文 SQLite
 ## 构建
 
 ```
-dotnet publish src/UmaFs.App -c Release -o publish
+dotnet publish src/UmaFs.App -c Release -o publish    # umafs.exe（CLI + 挂载）
+dotnet publish src/UmaDL  -c Release -o publish2      # umadl.exe（下载器）
 ```
 
 需要 .NET 8 SDK。产物是单个自包含 exe（约 39 MB，内含 .NET 运行时、SQLite3MC 原生库与 WinFsp 安装包）。
@@ -92,6 +93,8 @@ dotnet publish src/UmaFs.App -c Release -o publish
 
 ```
 src/UmamusumeData/     清单读取层，取自 MarshmallowAndroid/UmaMusumeExplorer，未改动
+src/UmaDL.Core/        云端清单展开 + 并发下载 + xxHash64 校验（无第三方依赖除 LZ4/xxHash）
+src/UmaDL/             独立下载器 umadl（WinForms GUI + CLI）
 src/UmaFs.Core/        清单索引、资源解密流、配置
 src/UmaFs.Assets/      AB 包解析与解包
 src/UmaFs.App/         CLI 与 WinFsp 挂载
@@ -109,7 +112,23 @@ vendor/AssetsTools.NET nesrak1/AssetsTools.NET（MIT），只用其 bundle 解�
 - **目录枚举**：`ReadDirectoryEntry` 的 marker 必须对所有条目（含 `.`/`..`）生效，否则大目录会死循环
 
 
-## 下载器（fetch）
+## 下载器 umadl（GUI + CLI，独立可执行文件）
+
+`umadl.exe` 是独立下载器，**不依赖本地游戏**，也不需要 WinFsp。双击开 GUI，带参数走 CLI。
+
+```
+umadl                        GUI
+umadl                        CLI 模式，默认下 DeleteOnLogin
+umadl -o D:\uma -j 16        指定目录与并发
+umadl --all --dry-run        先看全部需要多少
+umadl -g DownloadLogin       指定分组
+```
+
+GUI 控件：分组下拉、并发数、目录选择、检查清单 / 开始下载 / 停止、进度条、状态栏、日志区。
+
+`umafs fetch` 是同一套实现（共用 `UmaDL.Core`），适合脚本化；`umadl` 适合手动操作。
+
+### umafs fetch
 
 不需要完整游戏数据，直接从云端清单拉取。清单流程与 UmaViewer standalone / 游戏客户端一致：
 

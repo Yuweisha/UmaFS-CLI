@@ -313,9 +313,12 @@ public sealed class AssetDownloader
     /// <summary>
     /// 下载到 destDir/&lt;hash前2&gt;/&lt;hash&gt;。已存在且尺寸相符则跳过。
     /// </summary>
+    /// <summary>实时进度：已完成数 / 总数 / 成功 / 跳过 / 失败 / 字节数。</summary>
+    public sealed record Progress(int Done, int Total, int Downloaded, int Skipped, int Failed, long Bytes);
+
     public async Task<Result> RunAsync(
         IEnumerable<RemoteAsset> assets, string destDir, bool verify,
-        int parallel, Action<string>? log, CancellationToken ct)
+        int parallel, Action<string>? log, CancellationToken ct, Action<Progress>? onProgress = null)
     {
         var result = new Result();
         var gate = new SemaphoreSlim(parallel);
@@ -371,6 +374,9 @@ public sealed class AssetDownloader
                 if (log is not null && (d % 200 == 0 || d == total))
                     lock (okLock)
                         log($"  {d}/{total}  下载 {result.Downloaded} 跳过 {result.Skipped} 失败 {result.Failed}");
+                if (onProgress is not null)
+                    lock (okLock)
+                        onProgress(new Progress(d, total, result.Downloaded, result.Skipped, result.Failed, result.Bytes));
                 gate.Release();
             }
         });
