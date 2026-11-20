@@ -20,12 +20,14 @@ internal sealed class UmaFileSystem : FileSystemBase
     private readonly ulong _totalBytes;
     private long _indexSeed;
     private readonly System.Runtime.CompilerServices.ConditionalWeakTable<FsNode, object> _indexNumbers = new();
+    private readonly System.Runtime.CompilerServices.ConditionalWeakTable<DirNode, MountNode[]> _dirCache = new();
 
-    public UmaFileSystem(AssetIndex index, string volumeLabel)
+    public UmaFileSystem(AssetIndex index, string volumeLabel, bool hideMissing = true)
     {
         _index = index;
         _store = new AssetStore(index.PersistentRoot);
         VolumeLabel = volumeLabel;
+        HideMissing = hideMissing;
         _timestamp = (ulong)Directory.GetLastWriteTimeUtc(index.PersistentRoot).ToFileTimeUtc();
         _totalBytes = (ulong)Math.Max(index.Entries.Sum(e => e.Length), 1);
 
@@ -36,7 +38,17 @@ internal sealed class UmaFileSystem : FileSystemBase
 
     public string VolumeLabel { get; }
 
-    /// <summary>把底层异常打到 stderr，否则 winfsp 只会把错误变成"I/O 设备错误"。</summary>
+    /// <summary>
+    /// 清单里有、但 dat 里没有实际文件的条目（本机 5,906 条）。
+    /// 默认不列出：AssetStudio 这类工具遍历到不存在的文件会直接弹异常。
+    /// </summary>
+    public bool HideMissing { get; }
+
+    /// <summary>该条目是否应出现在磁盘上（目录恒为 true）。</summary>
+    private bool IsVisible(FsNode node) =>
+        node is not FileNode f || !HideMissing || f.IsRealFile || _index.FileExists(f);
+
+    /// <summary>把底层异常打到 stderr，否则 winfsp 只会把错误变成“I/O 设备错误”。</summary>
     public override int ExceptionHandler(Exception ex)
     {
         Console.Error.WriteLine($"[异常] {ex.GetType().Name}: {ex.Message}");
@@ -61,7 +73,7 @@ internal sealed class UmaFileSystem : FileSystemBase
     public override int GetSecurityByName(string fileName, out uint fileAttributes, ref byte[] securityDescriptor)
     {
         var node = _index.Resolve(fileName);
-        if (node is null)
+        if (node is null || !IsVisible(node))
         {
             fileAttributes = 0;
             return STATUS_OBJECT_NAME_NOT_FOUND;
@@ -93,14 +105,14 @@ internal sealed class UmaFileSystem : FileSystemBase
         normalizedName = null!;
 
         var node = _index.Resolve(fileName);
-        if (node is null) return STATUS_OBJECT_NAME_NOT_FOUND;
+        if (node is null || !IsVisible(node)) return STATUS_OBJECT_NAME_NOT_FOUND;
 
         var wrapper = new MountNode(node, BuildFileInfo(node));
         if (node is FileNode file)
         {
             try
             {
-                fileDesc = OpenStream(file);
+                fileDesc = new FileHandle(OpenStream(file));
             }
             catch (FileNotFoundException)
             {
@@ -127,42 +139,28 @@ internal sealed class UmaFileSystem : FileSystemBase
         return STATUS_SUCCESS;
     }
 
+    /// <summary>
+    /// Cleanup 在句柄关闭前调用，此后仍可能有 I/O（如 FILE_DELETE_ON_CLOSE 场景），
+    /// 所以这里**不释放**底层流；释放统一放在 Close。
+    /// </summary>
     public override void Cleanup(object fileNode, object fileDesc, string fileName, uint flags)
     {
-        if (fileDesc is IDisposable d) d.Dispose();
     }
 
     public override void Close(object fileNode, object fileDesc)
     {
-        if (fileDesc is IDisposable d) d.Dispose();
+        if (fileDesc is FileHandle handle) handle.Dispose();
     }
 
     public override int Read(object fileNode, object fileDesc, IntPtr buffer, ulong offset, uint length, out uint bytesTransferred)
     {
         bytesTransferred = 0;
-        if (fileDesc is not Stream stream) return STATUS_INVALID_HANDLE;
+        if (fileDesc is not FileHandle handle) return STATUS_INVALID_HANDLE;
 
-        long pos = (long)offset;
-        if (pos >= stream.Length) return STATUS_END_OF_FILE;
+        int total = handle.ReadAt(offset, buffer, length);
+        if (total < 0) return STATUS_ACCESS_DENIED;
+        if (total == 0) return STATUS_END_OF_FILE;
 
-        int want = (int)Math.Min(length, (uint)(stream.Length - pos));
-        if (want <= 0) return STATUS_END_OF_FILE;
-
-        byte[] tmp = new byte[want];
-        int total = 0;
-        lock (stream)
-        {
-            stream.Seek(pos, SeekOrigin.Begin);
-            while (total < want)
-            {
-                int n = stream.Read(tmp, total, want - total);
-                if (n <= 0) break;
-                total += n;
-            }
-        }
-        if (total <= 0) return STATUS_END_OF_FILE;
-
-        Marshal.Copy(tmp, 0, buffer, total);
         bytesTransferred = (uint)total;
         return STATUS_SUCCESS;
     }
@@ -189,19 +187,7 @@ internal sealed class UmaFileSystem : FileSystemBase
         var enumerator = context as IEnumerator<MountNode>;
         if (enumerator is null)
         {
-            var children = new List<MountNode>(dir.Children.Count + 2);
-            if (dir.Parent is not null)
-            {
-                children.Add(new MountNode(dir, BuildFileInfo(dir), "."));
-                children.Add(new MountNode(dir.Parent, BuildFileInfo(dir.Parent), ".."));
-            }
-
-            // 按展示名排序：marker 恢复要求名字序稳定，否则 winfsp 会重复/漏项
-            var kids = dir.GetChildren()
-                .Select(c => new MountNode(c, BuildFileInfo(c), c is FileNode f ? f.DisplayName : c.Name))
-                .OrderBy(m => m.DisplayName, StringComparer.OrdinalIgnoreCase)
-                .ToList();
-            children.AddRange(kids);
+            var children = GetEntries(dir);
 
             int start = 0;
             if (marker is not null)
@@ -225,6 +211,33 @@ internal sealed class UmaFileSystem : FileSystemBase
     }
 
     // ---------- 内部 ----------
+
+    /// <summary>
+    /// 目录项列表按目录缓存。全树遍历（37 万文件）时每个目录只构建一次，
+    /// 否则每次枚举都要重算 FileInfo + 逐个 stat。
+    /// </summary>
+    private List<MountNode> GetEntries(DirNode dir)
+    {
+        if (_dirCache.TryGetValue(dir, out var cached)) return new List<MountNode>(cached);
+
+        var children = new List<MountNode>(dir.Children.Count + 2);
+        if (dir.Parent is not null)
+        {
+            children.Add(new MountNode(dir, BuildFileInfo(dir), "."));
+            children.Add(new MountNode(dir.Parent, BuildFileInfo(dir.Parent), ".."));
+        }
+
+        // 按展示名排序：marker 恢复要求名字序稳定，否则 winfsp 会重复/漏项
+        var kids = dir.GetChildren()
+            .Where(IsVisible)
+            .Select(c => new MountNode(c, BuildFileInfo(c), c is FileNode f ? f.DisplayName : c.Name))
+            .OrderBy(m => m.DisplayName, StringComparer.OrdinalIgnoreCase);
+
+        children.AddRange(kids);
+        var arr = children.ToArray();
+        _dirCache.AddOrUpdate(dir, arr);
+        return new List<MountNode>(arr);
+    }
 
     private Stream OpenStream(FileNode file)
     {
@@ -261,6 +274,69 @@ internal sealed class UmaFileSystem : FileSystemBase
     /// <summary>文件 ID 必须稳定（同一节点多次查询返回同一个值），否则资源管理器会认成不同文件。</summary>
     private ulong IndexNumberOf(FsNode node) =>
         (ulong)(long)_indexNumbers.GetValue(node, _ => (object)Interlocked.Increment(ref _indexSeed))!;
+}
+
+/// <summary>
+/// 单次打开的读写句柄。Close 可能被调用多次（winfsp 在异常路径上会重复调用），
+/// 用 _disposed 保证幂等——否则二次 Dispose 会让后续 I/O 抛 ObjectDisposedException。
+/// </summary>
+internal sealed class FileHandle : IDisposable
+{
+    private readonly Stream _stream;
+    private readonly object _lock = new();
+    private int _disposed;
+
+    public FileHandle(Stream stream) => _stream = stream;
+
+    /// <summary>返回实际读到的字节数；0 表示到结尾；-1 表示句柄已失效。</summary>
+    public int ReadAt(ulong offset, IntPtr buffer, uint length)
+    {
+        if (Volatile.Read(ref _disposed) != 0) return -1;
+
+        lock (_lock)
+        {
+            if (_disposed != 0) return -1;
+            try
+            {
+                long pos = (long)offset;
+                if (pos >= _stream.Length) return 0;
+
+                int want = (int)Math.Min(length, (uint)(_stream.Length - pos));
+                if (want <= 0) return 0;
+
+                byte[] tmp = new byte[want];
+                int total = 0;
+                _stream.Seek(pos, SeekOrigin.Begin);
+                while (total < want)
+                {
+                    int n = _stream.Read(tmp, total, want - total);
+                    if (n <= 0) break;
+                    total += n;
+                }
+                if (total <= 0) return 0;
+
+                Marshal.Copy(tmp, 0, buffer, total);
+                return total;
+            }
+            catch (ObjectDisposedException)
+            {
+                return -1;
+            }
+            catch (IOException)
+            {
+                return -1;
+            }
+        }
+    }
+
+    public void Dispose()
+    {
+        if (Interlocked.Exchange(ref _disposed, 1) != 0) return;
+        lock (_lock)
+        {
+            try { _stream.Dispose(); } catch { }
+        }
+    }
 }
 
 internal sealed class MountNode

@@ -12,6 +12,7 @@
 - **自动补扩展名**：`.unity3d` / `.awb` / `.usm` / `.otf` / `.lz4` / `.manifest`
 - **WinFsp 自动安装**：未安装时用内置 MSI 静默安装（需要管理员）
 - **配置持久化**：首次探测到游戏目录后自动记住，之后无需再指定
+- **缺失数据过滤**：清单里有但本地没有数据的条目默认不列出，避免 AssetStudio 等工具报错
 
 ## 快速开始
 
@@ -26,6 +27,7 @@ umafs locate chr_icon_1001               查对象属于哪个 AB 包
 umafs bundle chara/chr1001/chr_icon_1001 列包内对象
 umafs extract chara/chr1001/chr_icon_1001 D:\tex   解包
 umafs mount -m U:                        挂载到 U:
+umafs check                              核对清单与本地数据，列出缺失条目
 ```
 
 ## 后缀说明
@@ -57,6 +59,16 @@ WinFsp 是**内核驱动**，无法免安装；程序内嵌官方 MSI（2.1.2515
 - 已安装但版本不匹配 → 提示，不做降级/升级
 
 `umafs winfsp` 可单独查看安装状态。
+
+### 缺失数据
+
+清单有 376,048 条，本机 dat 里实际有 370,143 条。差额 5,906 条来自两组：
+
+- `DeleteOnLogin`（4,464 条）——登录时删除的资源，本地本就不该存在
+- `DelayRelease` 等（约 1,400 条）——尚未发布的资源，CDN 上也返回 `NoSuchKey`
+
+这些条目在挂载时**默认不列出**，因为 AssetStudio 遍历到不存在的文件会直接抛
+`FileNotFoundException`。需要看到它们用 `--show-missing`；`umafs check` 可按分组列出全部缺失。
 
 挂载后的结构就是清单里的路径：
 

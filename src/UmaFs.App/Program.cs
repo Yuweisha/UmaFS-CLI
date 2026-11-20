@@ -37,6 +37,7 @@ internal static class Program
         var positional = new List<string>();
         string? mountPoint = null, label = null;
         bool noExt = false;
+        bool showMissing = false;
         int scanBudget = 0;
 
         for (int i = 0; i < args.Length; i++)
@@ -59,6 +60,9 @@ internal static class Program
                     break;
                 case "--no-ext":
                     noExt = true;
+                    break;
+                case "--show-missing":
+                    showMissing = true;
                     break;
                 case "-n" or "--limit":
                     if (i + 1 < args.Length && int.TryParse(args[i + 1], out var nb)) { scanBudget = nb; i++; }
@@ -120,6 +124,7 @@ internal static class Program
             "export" => Export(index, positional.ElementAtOrDefault(1), positional.ElementAtOrDefault(2)),
             "find" => Find(index, positional.ElementAtOrDefault(1), json),
             "stats" => Stats(index, json),
+            "check" => CheckCmd(index, json),
             "bundle" => BundleCmd(index, positional.Skip(1).ToList()),
             "locate" => LocateCmd(index, positional.ElementAtOrDefault(1), json, scanBudget),
             "scan" => ScanCmd(index, scanBudget),
@@ -127,7 +132,7 @@ internal static class Program
             "winfsp" => WinFspCmd(),
             "extract" => ExtractCmd(index, positional.ElementAtOrDefault(1), positional.ElementAtOrDefault(2)),
             "unpack" => ExtractCmd(index, positional.ElementAtOrDefault(1), positional.ElementAtOrDefault(2)),
-            "mount" => Mount(index, mountPoint, label ?? "UmaFs"),
+            "mount" => Mount(index, mountPoint, label ?? "UmaFs", showMissing),
             _ => Unknown(cmd)
         };
     }
@@ -151,6 +156,7 @@ internal static class Program
               extract <包> <目录>   解包：纹理导出 PNG，其它对象导出原始数据
               scan [-n N]           建立包内对象名索引（分批，可续建）
               stats                 清单统计
+              check                 核对清单与本地数据，列出缺失条目及其分组
 
             挂载命令（需要 WinFsp，未安装会用内置安装包自动装）:
               mount -m <盘符>       挂载为只读盘，例如 mount -m U:
@@ -167,6 +173,7 @@ internal static class Program
               -r, --root <路径>     游戏 Persistent 目录（优先于配置文件与自动探测）
                   --json            JSON 输出
                   --no-ext          不自动补扩展名（保持清单原始名称）
+                  --show-missing    挂载时也列出清单里有、但 dat 里缺数据的条目
               -l, --label <卷标>    挂载卷标，默认 UmaFs
               -n N                  scan/locate 本次最多处理 N 个包
 
@@ -421,7 +428,7 @@ internal static class Program
 
     // ---------- 挂载 ----------
 
-    private static int Mount(AssetIndex index, string? mountPoint, string label)
+    private static int Mount(AssetIndex index, string? mountPoint, string label, bool showMissing)
     {
         if (string.IsNullOrWhiteSpace(mountPoint))
         {
@@ -440,7 +447,7 @@ internal static class Program
         // 必须在任何 Fsp 类型首次使用前，把实际 SxS bin 目录加进 DLL 搜索路径
         WinFspSetup.PrepareDllSearchPath();
 
-        var fs = new UmaFileSystem(index, label);
+        var fs = new UmaFileSystem(index, label, hideMissing: !showMissing);
         using var host = new Fsp.FileSystemHost(fs)
         {
             FileSystemName = "UmaFs",
@@ -478,6 +485,75 @@ internal static class Program
 
         host.Unmount();
         Console.WriteLine("已卸载。");
+        return 0;
+    }
+
+    // ---------- 完整性检查 ----------
+
+    /// <summary>
+    /// check — 核对清单与本地 dat 的一致性。
+    /// 缺数据的条目按分组归类：DelayRelease 这类通常服务器上也没发布（CDN 返回 NoSuchKey）。
+    /// </summary>
+    private static int CheckCmd(AssetIndex index, bool json)
+    {
+        var files = index.Entries.Where(e => !e.Name.StartsWith("/")).ToList();
+        var missing = new List<ManifestEntry>();
+        var missingLock = new object();
+
+        Parallel.ForEach(files, new ParallelOptions { MaxDegreeOfParallelism = 16 }, e =>
+        {
+            string p = Path.Combine(index.PersistentRoot, "dat", e.HashName[..2], e.HashName);
+            if (!File.Exists(p)) lock (missingLock) missing.Add(e);
+        });
+
+        var byGroup = missing
+            .GroupBy(e => e.Group.ToString())
+            .Select(g => new { group = g.Key, count = g.Count() })
+            .OrderByDescending(g => g.count)
+            .ToList();
+
+        var byTop = missing
+            .GroupBy(e => e.Name.Split('/')[0])
+            .Select(g => new { dir = g.Key, count = g.Count() })
+            .OrderByDescending(g => g.count)
+            .Take(20)
+            .ToList();
+
+        if (json)
+        {
+            Console.WriteLine(System.Text.Json.JsonSerializer.Serialize(new
+            {
+                total = files.Count,
+                present = files.Count - missing.Count,
+                missing = missing.Count,
+                byGroup,
+                byTopDir = byTop
+            }, JsonOpts));
+            return 0;
+        }
+
+        Console.WriteLine($"清单条目: {files.Count}");
+        Console.WriteLine($"有数据:   {files.Count - missing.Count}");
+        Console.WriteLine($"缺数据:   {missing.Count}");
+
+        if (missing.Count == 0) return 0;
+
+        Console.WriteLine();
+        Console.WriteLine("缺失按分组:");
+        foreach (var g in byGroup) Console.WriteLine($"  {g.group,-40} {g.count}");
+
+        Console.WriteLine();
+        Console.WriteLine("缺失按顶层目录:");
+        foreach (var g in byTop) Console.WriteLine($"  {g.dir,-24} {g.count}");
+
+        var sample = missing.Take(10).Select(e => $"  {e.Name}  ({e.Group})").ToList();
+        Console.WriteLine();
+        Console.WriteLine("样例:");
+        foreach (var s in sample) Console.WriteLine(s);
+
+        Console.WriteLine();
+        Console.WriteLine("说明: DelayRelease 分组通常是尚未发布的资源，服务器上也没有（CDN 返回 NoSuchKey）；");
+        Console.WriteLine("      其它分组的缺失多为客户端未下载完整，可在游戏内让它重新校验一次。");
         return 0;
     }
 
