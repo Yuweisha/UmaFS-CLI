@@ -124,7 +124,22 @@ umadl --all --dry-run        先看全部需要多少
 umadl -g DownloadLogin       指定分组
 ```
 
-GUI 控件：分组下拉、并发数、目录选择、检查清单 / 开始下载 / 停止、进度条、状态栏、日志区。
+GUI 控件：分组下拉、并发数、目录选择、**代理**、检查清单 / 开始下载 / 停止、进度条、状态栏、日志区。
+
+### 代理
+
+支持 HTTP 代理（`http://` 也接受裸 `host:port`）：
+
+```bash
+umadl -p 127.0.0.1:7890        # 显式指定
+umadl -p off                   # 强制直连
+```
+
+不指定时读 `HTTPS_PROXY` / `HTTP_PROXY` / `ALL_PROXY` 环境变量。GUI 会自动填入环境里的代理，
+勾选「使用代理」后生效，「测试」按钮同时探测 root API 与 CDN。
+
+**注意**：代理出口常被 Akamai 对 CDN 拦成 403（root API 却可能正常）。「测试」会分别报告两项，
+只有 CDN 也通才能下载。这种代理下需要换代理或改用直连。
 
 `umafs fetch` 是同一套实现（共用 `UmaDL.Core`），适合脚本化；`umadl` 适合手动操作。
 

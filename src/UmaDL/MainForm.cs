@@ -9,6 +9,9 @@ internal sealed class MainForm : Form
     private readonly TextBox _destBox = new() { Width = 520 };
     private readonly NumericUpDown _parallelBox = new() { Minimum = 1, Maximum = 64, Value = 8, Width = 60 };
     private readonly Button _browseBtn = new() { Text = "…", Width = 30 };
+    private readonly TextBox _proxyBox = new() { Width = 300 };
+    private readonly CheckBox _proxyChk = new() { Text = "使用代理", Width = 90, Height = 22, Checked = false };
+    private readonly Button _proxyTestBtn = new() { Text = "测试", Width = 60 };
     private readonly Button _checkBtn = new() { Text = "检查清单", Width = 96 };
     private readonly Button _startBtn = new() { Text = "开始下载", Width = 96 };
     private readonly Button _stopBtn = new() { Text = "停止", Width = 70, Enabled = false };
@@ -39,8 +42,8 @@ internal sealed class MainForm : Form
     public MainForm()
     {
         Text = "UmaDL — 赛马娘资源下载器";
-        ClientSize = new Size(700, 540);
-        MinimumSize = new Size(700, 540);
+        ClientSize = new Size(700, 600);
+        MinimumSize = new Size(700, 600);
         FormBorderStyle = FormBorderStyle.Sizable;
         StartPosition = FormStartPosition.CenterScreen;
 
@@ -60,28 +63,130 @@ internal sealed class MainForm : Form
         mid.Controls.Add(_destBox);
         mid.Controls.Add(_browseBtn);
 
-        var buttons = new FlowLayoutPanel { Left = 16, Top = 130, Width = 668, Height = 34, Anchor = AnchorStyles.Top | AnchorStyles.Left | AnchorStyles.Right };
+        var proxyRow = new FlowLayoutPanel { Left = 16, Top = 130, Width = 668, Height = 32, Anchor = AnchorStyles.Top | AnchorStyles.Left | AnchorStyles.Right };
+        proxyRow.Controls.Add(new Label { Text = "代理", Width = 34, Height = 22, TextAlign = ContentAlignment.MiddleLeft });
+        proxyRow.Controls.Add(_proxyBox);
+        proxyRow.Controls.Add(_proxyChk);
+        proxyRow.Controls.Add(_proxyTestBtn);
+
+        var buttons = new FlowLayoutPanel { Left = 16, Top = 168, Width = 668, Height = 34, Anchor = AnchorStyles.Top | AnchorStyles.Left | AnchorStyles.Right };
         buttons.Controls.Add(_checkBtn);
         buttons.Controls.Add(_startBtn);
         buttons.Controls.Add(_stopBtn);
 
-        _bar.Left = 16; _bar.Top = 172;
+        _bar.Left = 16; _bar.Top = 212;
         _bar.Width = 668;
-        _status.Left = 16; _status.Top = 198;
-        int logH = ClientSize.Height - 222 - 40;
-        _log.Left = 16; _log.Top = 222; _log.Width = 668; _log.Height = logH;
+        _status.Left = 16; _status.Top = 240;
+        int logH = ClientSize.Height - 268 - 40;
+        _log.Left = 16; _log.Top = 268; _log.Width = 668; _log.Height = logH;
         _log.Anchor = AnchorStyles.Top | AnchorStyles.Bottom | AnchorStyles.Left | AnchorStyles.Right;
         _log.WordWrap = false;
 
-        Controls.AddRange(new Control[] { top, mid, buttons, _bar, _status, _log });
+        Controls.AddRange(new Control[] { top, mid, proxyRow, buttons, _bar, _status, _log });
 
         _browseBtn.Click += (_, _) => Browse();
+        _proxyTestBtn.Click += async (_, _) => await TestProxyAsync();
+        _proxyChk.CheckedChanged += (_, _) => SyncProxyUi();
         _checkBtn.Click += async (_, _) => await CheckAsync();
         _startBtn.Click += async (_, _) => await StartAsync();
         _stopBtn.Click += (_, _) => _cts?.Cancel();
 
+        // 环境里配了代理就自动带上，省得每次手填
+        string? envProxy = UmaFs.Core.Net.ProxyFromEnvironment();
+        if (!string.IsNullOrWhiteSpace(envProxy))
+        {
+            _proxyBox.Text = envProxy;
+            _proxyChk.Checked = true;
+            Append($"检测到环境代理: {envProxy}（已填入，可取消勾选）");
+        }
+
+        SyncProxyUi();
         Append($"输出目录: {_destBox.Text}");
         Append("点「检查清单」查看待下载数量，或直接「开始下载」。");
+    }
+
+    /// <summary>未勾选时代理输入框与测试按钮置灰，背景也随之变色，避免看起来仍可编辑。</summary>
+    private void SyncProxyUi()
+    {
+        bool on = _proxyChk.Checked;
+        _proxyBox.Enabled = on;
+        _proxyTestBtn.Enabled = on;
+        _proxyBox.BackColor = on ? SystemColors.Window : SystemColors.Control;
+    }
+
+    /// <summary>把界面上的代理设置应用到全局网络配置。返回 false 表示地址无效。</summary>
+    private bool ApplyProxy()
+    {
+        try
+        {
+            UmaFs.Core.Net.SetProxy(_proxyChk.Checked ? _proxyBox.Text : "off");
+            return true;
+        }
+        catch (ArgumentException ex)
+        {
+            Append($"代理设置错误: {ex.Message}");
+            _status.Text = "代理地址无效";
+            return false;
+        }
+    }
+
+    /// <summary>测试代理是否可用：请求 root API 并报耗时。</summary>
+    private async Task TestProxyAsync()
+    {
+        if (!ApplyProxy()) return;
+
+        _proxyTestBtn.Enabled = false;
+        _status.Text = "测试代理…";
+        try
+        {
+            var sw = System.Diagnostics.Stopwatch.StartNew();
+            var (okRoot, msgRoot, msRoot) = await Task.Run(async () =>
+            {
+                var t = System.Diagnostics.Stopwatch.StartNew();
+                try
+                {
+                    using var http = UmaFs.Core.Net.CreateClient(2, TimeSpan.FromSeconds(30));
+                    string body = await http.GetStringAsync(UmaFs.Core.RemoteManifest.RootApi);
+                    return (true, body.Length > 80 ? body[..80] + "…" : body, t.ElapsedMilliseconds);
+                }
+                catch (Exception ex) { return (false, ex.Message, t.ElapsedMilliseconds); }
+            });
+
+            // root API 通不代表 CDN 通：代理出口常被 Akamai 拦成 403
+            var (okCdn, msgCdn, msCdn) = await Task.Run(async () =>
+            {
+                var t = System.Diagnostics.Stopwatch.StartNew();
+                try
+                {
+                    using var http = UmaFs.Core.Net.CreateClient(2, TimeSpan.FromSeconds(30));
+                    string probe = "https://prd-storage-app-umamusume.akamaized.net/dl/resources/Manifest/XG/XGAGOCS7ZM7H3EWCUURVRFCTF6EE2UGT";
+                    using var resp = await http.GetAsync(probe);
+                    return ((int)resp.StatusCode is 200 or 206, $"HTTP {(int)resp.StatusCode}", t.ElapsedMilliseconds);
+                }
+                catch (Exception ex) { return (false, ex.Message, t.ElapsedMilliseconds); }
+            });
+            sw.Stop();
+
+            string pl = UmaFs.Core.Net.ProxyLabel ?? "直连";
+            Append($"代理: {pl}");
+            Append($"  root API : {(okRoot ? "通" : "不通")}  {msRoot} ms  {msgRoot}");
+            Append($"  CDN      : {(okCdn ? "通" : "不通")}  {msCdn} ms  {msgCdn}");
+            if (okRoot && !okCdn)
+                Append("  注意：CDN 不通（常见为 403，代理出口被 Akamai 拦）。下载会失败，需换代理或取消勾选直连。");
+
+            _status.Text = okRoot && okCdn ? $"代理正常（{sw.ElapsedMilliseconds} ms）"
+                         : okRoot ? "API 通，CDN 不通"
+                         : "代理不可用";
+        }
+        catch (Exception ex)
+        {
+            Append($"代理测试失败: {ex.GetType().Name}: {ex.Message}");
+            _status.Text = "代理不可用";
+        }
+        finally
+        {
+            _proxyTestBtn.Enabled = _proxyChk.Checked;
+        }
     }
 
     private void Browse()
@@ -97,6 +202,8 @@ internal sealed class MainForm : Form
 
     private async Task CheckAsync()
     {
+        if (!ApplyProxy()) return;
+
         _checkBtn.Enabled = false;
         _status.Text = "读取清单…";
         _cts = new CancellationTokenSource();
@@ -126,6 +233,8 @@ internal sealed class MainForm : Form
 
     private async Task StartAsync()
     {
+        if (!ApplyProxy()) return;
+
         _startBtn.Enabled = false;
         _stopBtn.Enabled = true;
         _cts = new CancellationTokenSource();

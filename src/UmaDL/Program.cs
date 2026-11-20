@@ -32,6 +32,8 @@ internal static class Program
         string? group = "DeleteOnLogin";
         int parallel = 8, limit = 0;
         bool dryRun = false, noVerify = false;
+        string? proxy = null;
+        bool proxySet = false;
 
         for (int i = 0; i < args.Length; i++)
         {
@@ -61,13 +63,42 @@ internal static class Program
                 case "--no-verify":
                     noVerify = true;
                     break;
+                case "--proxy" or "-p":
+                    proxy = ++i < args.Length ? args[i] : null;
+                    proxySet = true;
+                    break;
                 default:
                     if (!args[i].StartsWith('-')) group = args[i];
                     break;
             }
         }
 
-        return Cli.Run(dest, group, parallel, limit, dryRun, noVerify);
+        // 代理：显式参数优先；否则读 HTTP_PROXY / HTTPS_PROXY / ALL_PROXY
+        try
+        {
+            string? effective = proxySet ? proxy : UmaFs.Core.Net.ProxyFromEnvironment();
+            if (!string.IsNullOrWhiteSpace(effective))
+            {
+                UmaFs.Core.Net.SetProxy(effective);
+                Console.WriteLine($"代理: {UmaFs.Core.Net.ProxyLabel}");
+            }
+        }
+        catch (ArgumentException ex)
+        {
+            Console.Error.WriteLine(ex.Message);
+            return 2;
+        }
+
+        try
+        {
+            return Cli.Run(dest, group, parallel, limit, dryRun, noVerify);
+        }
+        catch (Exception ex)
+        {
+            Console.Error.WriteLine($"失败: {ex.Message}");
+            if (ex.InnerException is not null) Console.Error.WriteLine($"  {ex.InnerException.Message}");
+            return 1;
+        }
     }
 
     private static void ConsoleHelp()
@@ -83,6 +114,8 @@ internal static class Program
                                    DeleteOnLogin / DownloadLogin / DelayRelease / none …
               -j, --parallel <N>   并发数，默认 8
               -n, --limit <N>      只处理前 N 条
+              -p, --proxy <url>    HTTP 代理，如 http://127.0.0.1:7890；--proxy off 强制直连
+                                   不指定时读 HTTP_PROXY / HTTPS_PROXY / ALL_PROXY
                   --dry-run        只统计不下载
                   --no-verify      跳过 xxHash64 校验
 
@@ -90,6 +123,7 @@ internal static class Program
               umadl                           下载 DeleteOnLogin（默认）
               umadl DeleteOnLogin -o D:\uma   指定分组与目录
               umadl --all --dry-run           看全部资源需要多少
+              umadl -p 127.0.0.1:7890         走本地代理
             """);
     }
 }

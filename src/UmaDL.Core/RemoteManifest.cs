@@ -32,20 +32,8 @@ public sealed class RemoteManifest
     /// <summary>CDN 会按 UA 拦截，必须伪装成 Unity。</summary>
     public const string UserAgent = "UnityPlayer/2022.3.62f1 (UnityWebRequest/1.0, libcurl/7.52.0-DEV)";
 
-    private static readonly HttpClient Http = CreateClient();
-
-    private static HttpClient CreateClient()
-    {
-        var handler = new SocketsHttpHandler
-        {
-            AutomaticDecompression = DecompressionMethods.None,
-            MaxConnectionsPerServer = 32,
-            PooledConnectionLifetime = TimeSpan.FromMinutes(5),
-        };
-        var c = new HttpClient(handler) { Timeout = TimeSpan.FromMinutes(10) };
-        c.DefaultRequestHeaders.TryAddWithoutValidation("User-Agent", UserAgent);
-        return c;
-    }
+    // 客户端按当前代理设置现建，代理变更后无需重启
+    private static HttpClient NewClient(int conns = 16) => Net.CreateClient(conns);
 
     public string RootHash { get; private set; } = "";
     public List<RemoteAsset> Assets { get; } = new();
@@ -64,19 +52,20 @@ public sealed class RemoteManifest
     public static async Task<RemoteManifest> FetchAsync(Action<string>? log = null, CancellationToken ct = default)
     {
         var rm = new RemoteManifest();
+        using var http = NewClient();
 
-        string payload = await Http.GetStringAsync(RootApi, ct).ConfigureAwait(false);
+        string payload = await http.GetStringAsync(RootApi, ct).ConfigureAwait(false);
         var node = JsonNode.Parse(payload);
         rm.RootHash = node?["h"]?.GetValue<string>()
             ?? throw new InvalidOperationException("root API 返回里没有 h 字段");
         log?.Invoke($"root: {rm.RootHash}");
 
-        var rootRows = await FetchManifestAsync(rm.RootHash, ct).ConfigureAwait(false);
+        var rootRows = await FetchManifestAsync(http, rm.RootHash, ct).ConfigureAwait(false);
         log?.Invoke($"root 清单: {rootRows.Count} 行（{string.Join(",", rootRows.Select(r => r.Name))}）");
 
         var win = rootRows.FirstOrDefault(r => r.Name == "Windows")
             ?? throw new InvalidOperationException("root 清单缺少 Windows 平台");
-        var platRows = await FetchManifestAsync(win.Hash, ct).ConfigureAwait(false);
+        var platRows = await FetchManifestAsync(http, win.Hash, ct).ConfigureAwait(false);
         log?.Invoke($"平台清单: {platRows.Count} 个分清单");
 
         var manifests = platRows.Where(r => r.Name != "Windows").ToList();
@@ -86,7 +75,7 @@ public sealed class RemoteManifest
             ct.ThrowIfCancellationRequested();
             try
             {
-                var rows = await FetchManifestAsync(m.Hash, ct).ConfigureAwait(false);
+                var rows = await FetchManifestAsync(http, m.Hash, ct).ConfigureAwait(false);
                 foreach (var r in rows)
                 {
                     r.Manifest = m.Name;
@@ -104,19 +93,26 @@ public sealed class RemoteManifest
         return rm;
     }
 
-    private static async Task<List<RemoteAsset>> FetchManifestAsync(string hash, CancellationToken ct)
+    private static async Task<List<RemoteAsset>> FetchManifestAsync(HttpClient http, string hash, CancellationToken ct)
     {
         byte[]? raw = null;
+        string? lastError = null;
         foreach (var b in new[] { ManifestUrl, ManifestUrlAlt })
         {
+            string url = $"{b}/{hash[..2]}/{hash}";
             try
             {
-                raw = await Http.GetByteArrayAsync($"{b}/{hash[..2]}/{hash}", ct).ConfigureAwait(false);
+                raw = await http.GetByteArrayAsync(url, ct).ConfigureAwait(false);
                 break;
             }
-            catch (HttpRequestException) { }
+            catch (Exception ex)
+            {
+                // 403 多半是代理出口被 CDN 拦；把状态码带出来才能判断是哪一层的问题
+                lastError = $"{url} -> {ex.Message}";
+            }
         }
-        if (raw is null) throw new HttpRequestException($"清单下载失败: {hash}");
+        if (raw is null)
+            throw new HttpRequestException($"清单下载失败 {hash}（代理: {Net.ProxyLabel ?? "直连"}）: {lastError}");
 
         using var dec = LZ4Stream.Decode(new MemoryStream(raw));
         using var ms = new MemoryStream();
@@ -291,17 +287,9 @@ public sealed class RemoteManifest
 /// <summary>并发下载 + 校验。</summary>
 public sealed class AssetDownloader
 {
-    private readonly HttpClient _http = new(new SocketsHttpHandler
-    {
-        MaxConnectionsPerServer = 16,
-        PooledConnectionLifetime = TimeSpan.FromMinutes(5)
-    })
-    { Timeout = TimeSpan.FromMinutes(10) };
+    private readonly HttpClient _http;
 
-    public AssetDownloader()
-    {
-        _http.DefaultRequestHeaders.TryAddWithoutValidation("User-Agent", RemoteManifest.UserAgent);
-    }
+    public AssetDownloader() => _http = Net.CreateClient(32);
 
     public sealed class Result
     {
