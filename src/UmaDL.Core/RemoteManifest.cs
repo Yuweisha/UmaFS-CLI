@@ -6,6 +6,51 @@ using K4os.Compression.LZ4.Streams;
 
 namespace UmaFs.Core;
 
+/// <summary>资源平台。PC 指 Windows 打包，Android 是移动端，两者清单与资源包都不同。</summary>
+public enum GamePlatform
+{
+    Windows,
+    Android,
+    IOS,
+}
+
+public static class GamePlatformExtensions
+{
+    /// <summary>平台清单里的名字（root 清单中对应条目的 name）。</summary>
+    public static string ManifestName(this GamePlatform p) => p switch
+    {
+        GamePlatform.Windows => "Windows",
+        GamePlatform.Android => "Android",
+        GamePlatform.IOS => "iOS",
+        _ => "Windows",
+    };
+
+    /// <summary>CDN 上 assetbundles 的目录名。</summary>
+    public static string AssetFolder(this GamePlatform p) => p switch
+    {
+        GamePlatform.Windows => "Windows",
+        GamePlatform.Android => "Android",
+        GamePlatform.IOS => "iOS",
+        _ => "Windows",
+    };
+
+    /// <summary>宽松解析用户输入的平台名。</summary>
+    public static bool TryParse(string? s, out GamePlatform platform)
+    {
+        switch ((s ?? "").Trim().ToLowerInvariant())
+        {
+            case "pc" or "win" or "windows":
+                platform = GamePlatform.Windows; return true;
+            case "android" or "apk" or "mobile":
+                platform = GamePlatform.Android; return true;
+            case "ios" or "iphone":
+                platform = GamePlatform.IOS; return true;
+            default:
+                platform = GamePlatform.Windows; return false;
+        }
+    }
+}
+
 /// <summary>清单里的一条资源。</summary>
 public sealed class RemoteAsset
 {
@@ -27,7 +72,10 @@ public sealed class RemoteManifest
     private const string ManifestUrl = "https://prd-storage-app-umamusume.akamaized.net/dl/resources/Manifest";
     private const string ManifestUrlAlt = "https://prd-storage-game-umamusume.akamaized.net/dl/resources/Manifest";
     public const string GenericUrl = "https://prd-storage-game-umamusume.akamaized.net/dl/resources/Generic";
-    public const string AssetUrl = "https://prd-storage-game-umamusume.akamaized.net/dl/resources/Windows/assetbundles";
+
+    /// <summary>资源包 CDN 前缀（平台相关）。</summary>
+    public static string AssetBase(GamePlatform p) =>
+        $"https://prd-storage-game-umamusume.akamaized.net/dl/resources/{p.AssetFolder()}/assetbundles";
 
     /// <summary>CDN 会按 UA 拦截，必须伪装成 Unity。</summary>
     public const string UserAgent = "UnityPlayer/2022.3.62f1 (UnityWebRequest/1.0, libcurl/7.52.0-DEV)";
@@ -36,22 +84,26 @@ public sealed class RemoteManifest
     private static HttpClient NewClient(int conns = 16) => Net.CreateClient(conns);
 
     public string RootHash { get; private set; } = "";
+    public GamePlatform Platform { get; private set; } = GamePlatform.Windows;
+    /// <summary>各平台的平台清单 hash，便于诊断。</summary>
+    public Dictionary<string, string> PlatformHashes { get; } = new();
     public List<RemoteAsset> Assets { get; } = new();
     public List<(string Name, string Error)> Failures { get; } = new();
 
-    /// <summary>带扩展名的走 Generic，否则走 assetbundles（与游戏一致）。</summary>
-    public static string UrlFor(RemoteAsset a)
+    /// <summary>带扩展名的走 Generic，否则走当前平台的 assetbundles（与游戏一致）。</summary>
+    public static string UrlFor(RemoteAsset a, GamePlatform platform = GamePlatform.Windows)
     {
         bool hasExt = Path.HasExtension(a.Name);
         string h = a.Hash;
         return hasExt
             ? $"{GenericUrl}/{h[..2]}/{h}"
-            : $"{AssetUrl}/{h[..2]}/{h}";
+            : $"{AssetBase(platform)}/{h[..2]}/{h}";
     }
 
-    public static async Task<RemoteManifest> FetchAsync(Action<string>? log = null, CancellationToken ct = default)
+    public static async Task<RemoteManifest> FetchAsync(GamePlatform platform = GamePlatform.Windows,
+        Action<string>? log = null, CancellationToken ct = default)
     {
-        var rm = new RemoteManifest();
+        var rm = new RemoteManifest { Platform = platform };
         using var http = NewClient();
 
         string payload = await http.GetStringAsync(RootApi, ct).ConfigureAwait(false);
@@ -63,12 +115,18 @@ public sealed class RemoteManifest
         var rootRows = await FetchManifestAsync(http, rm.RootHash, ct).ConfigureAwait(false);
         log?.Invoke($"root 清单: {rootRows.Count} 行（{string.Join(",", rootRows.Select(r => r.Name))}）");
 
-        var win = rootRows.FirstOrDefault(r => r.Name == "Windows")
-            ?? throw new InvalidOperationException("root 清单缺少 Windows 平台");
-        var platRows = await FetchManifestAsync(http, win.Hash, ct).ConfigureAwait(false);
-        log?.Invoke($"平台清单: {platRows.Count} 个分清单");
+        foreach (var r in rootRows) rm.PlatformHashes[r.Name] = r.Hash;
+        log?.Invoke($"root 内平台: {string.Join(", ", rootRows.Select(r => $"{r.Name}={r.Hash[..8]}…"))}");
 
-        var manifests = platRows.Where(r => r.Name != "Windows").ToList();
+        string want = platform.ManifestName();
+        var plat = rootRows.FirstOrDefault(r => r.Name.Equals(want, StringComparison.OrdinalIgnoreCase))
+            ?? throw new InvalidOperationException(
+                $"root 清单里没有 {want} 平台（现有: {string.Join(", ", rootRows.Select(r => r.Name))}）");
+
+        var platRows = await FetchManifestAsync(http, plat.Hash, ct).ConfigureAwait(false);
+        log?.Invoke($"{want} 平台清单: {platRows.Count} 个分清单");
+
+        var manifests = platRows.Where(r => !r.Name.Equals(want, StringComparison.OrdinalIgnoreCase)).ToList();
         int done = 0;
         foreach (var m in manifests)
         {
@@ -306,7 +364,8 @@ public sealed class AssetDownloader
 
     public async Task<Result> RunAsync(
         IEnumerable<RemoteAsset> assets, string destDir, bool verify,
-        int parallel, Action<string>? log, CancellationToken ct, Action<Progress>? onProgress = null)
+        int parallel, Action<string>? log, CancellationToken ct, Action<Progress>? onProgress = null,
+        GamePlatform platform = GamePlatform.Windows)
     {
         var result = new Result();
         var gate = new SemaphoreSlim(parallel);
@@ -325,7 +384,7 @@ public sealed class AssetDownloader
                     return;
                 }
 
-                byte[] data = await _http.GetByteArrayAsync(RemoteManifest.UrlFor(a), ct).ConfigureAwait(false);
+                byte[] data = await _http.GetByteArrayAsync(RemoteManifest.UrlFor(a, platform), ct).ConfigureAwait(false);
                 if (data.Length != a.Size)
                     throw new InvalidDataException($"大小不符 {data.Length} != {a.Size}");
 

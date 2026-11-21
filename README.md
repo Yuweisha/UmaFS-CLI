@@ -126,6 +126,21 @@ umadl -g DownloadLogin       指定分组
 
 GUI 控件：分组下拉、并发数、目录选择、**代理**、检查清单 / 开始下载 / 停止、进度条、状态栏、日志区。
 
+### 平台切换
+
+默认下 PC（Windows）版资源。Android 与 PC 的清单和资源包都不同，需要显式指定：
+
+```bash
+umadl --platform android          # 或 apk / mobile
+umadl --platform ios
+umadl --platform pc               # 默认，也可写 win / windows
+```
+
+GUI 第一行有「平台」下拉框（PC / Android / iOS）。
+
+资源包路径随之切换：`/dl/resources/{Windows|Android|iOS}/assetbundles/`；
+带扩展名的资源（音频、视频、字体等）走 `/dl/resources/Generic/`，与平台无关。
+
 ### 代理
 
 支持 HTTP 代理（`http://` 也接受裸 `host:port`）：

@@ -7,13 +7,13 @@ internal static class Cli
 {
     public static int Run(string dest, string? group, int parallel, int limit, bool dryRun, bool noVerify,
                           Action<string>? log = null, Action<AssetDownloader.Progress>? progress = null,
-                          CancellationToken ct = default)
+                          CancellationToken ct = default, GamePlatform platform = GamePlatform.Windows)
     {
         void Log(string s) => (log ?? Console.WriteLine)(s);
 
         Log("读取云端清单…");
-        var rm = RemoteManifest.FetchAsync(s => Log("  " + s), ct).GetAwaiter().GetResult();
-        Log($"清单就绪: {rm.Assets.Count} 条（失败分清单 {rm.Failures.Count}）");
+        var rm = RemoteManifest.FetchAsync(platform, s => Log("  " + s), ct).GetAwaiter().GetResult();
+        Log($"平台: {platform.ManifestName()}   清单就绪: {rm.Assets.Count} 条（失败分清单 {rm.Failures.Count}）");
 
         var selected = rm.Assets.Where(a => RemoteManifest.MatchesGroup(a, group)).ToList();
         if (limit > 0) selected = selected.Take(limit).ToList();
@@ -41,7 +41,7 @@ internal static class Cli
         Directory.CreateDirectory(dest);
         var sw = System.Diagnostics.Stopwatch.StartNew();
         var result = new AssetDownloader()
-            .RunAsync(todo, dest, !noVerify, parallel, s => Log(s), ct, progress)
+            .RunAsync(todo, dest, !noVerify, parallel, s => Log(s), ct, progress, platform)
             .GetAwaiter().GetResult();
         sw.Stop();
 

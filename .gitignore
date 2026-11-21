@@ -4,3 +4,4 @@ publish/
 *.user
 .vs/
 publish*/
+tools/version_token.txt

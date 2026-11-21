@@ -6,6 +6,7 @@ namespace UmaDL;
 internal sealed class MainForm : Form
 {
     private readonly ComboBox _groupBox = new() { DropDownStyle = ComboBoxStyle.DropDownList, Width = 210 };
+    private readonly ComboBox _platBox = new() { DropDownStyle = ComboBoxStyle.DropDownList, Width = 96 };
     private readonly TextBox _destBox = new() { Width = 520 };
     private readonly NumericUpDown _parallelBox = new() { Minimum = 1, Maximum = 64, Value = 8, Width = 60 };
     private readonly Button _browseBtn = new() { Text = "…", Width = 30 };
@@ -47,6 +48,9 @@ internal sealed class MainForm : Form
         FormBorderStyle = FormBorderStyle.Sizable;
         StartPosition = FormStartPosition.CenterScreen;
 
+        _platBox.Items.AddRange(new object[] { "PC", "Android", "iOS" });
+        _platBox.SelectedIndex = 0;
+
         foreach (var g in Groups) _groupBox.Items.Add(g.Label);
         _groupBox.SelectedIndex = 0;
         _destBox.Text = Path.Combine(
@@ -55,6 +59,8 @@ internal sealed class MainForm : Form
         var top = new FlowLayoutPanel { Left = 16, Top = 12, Width = 668, Height = 76, WrapContents = true, Anchor = AnchorStyles.Top | AnchorStyles.Left | AnchorStyles.Right };
         top.Controls.Add(new Label { Text = "分组", Width = 34, Height = 22, TextAlign = ContentAlignment.MiddleLeft });
         top.Controls.Add(_groupBox);
+        top.Controls.Add(new Label { Text = "平台", Width = 34, Height = 22, TextAlign = ContentAlignment.MiddleLeft });
+        top.Controls.Add(_platBox);
         top.Controls.Add(new Label { Text = "并发", Width = 34, Height = 22, TextAlign = ContentAlignment.MiddleLeft });
         top.Controls.Add(_parallelBox);
 
@@ -195,6 +201,13 @@ internal sealed class MainForm : Form
         if (dlg.ShowDialog(this) == DialogResult.OK) _destBox.Text = dlg.SelectedPath;
     }
 
+    private GamePlatform SelectedPlatform => _platBox.SelectedIndex switch
+    {
+        1 => GamePlatform.Android,
+        2 => GamePlatform.IOS,
+        _ => GamePlatform.Windows,
+    };
+
     private string? SelectedGroup =>
         _groupBox.SelectedIndex >= 0 && _groupBox.SelectedIndex < Groups.Length
             ? Groups[_groupBox.SelectedIndex].Value
@@ -210,7 +223,7 @@ internal sealed class MainForm : Form
         try
         {
             var ct = _cts.Token;
-            _manifest = await Task.Run(() => RemoteManifest.FetchAsync(Append, ct), ct);
+            _manifest = await Task.Run(() => RemoteManifest.FetchAsync(SelectedPlatform, Append, ct), ct);
             Append($"清单就绪: {_manifest.Assets.Count} 条，失败分清单 {_manifest.Failures.Count}");
 
             var g = SelectedGroup;
@@ -261,7 +274,7 @@ internal sealed class MainForm : Form
 
         try
         {
-            await Task.Run(() => Cli.Run(dest, group, parallel, 0, false, false, Append, p => progress.Report(p), ct), ct);
+            await Task.Run(() => Cli.Run(dest, group, parallel, 0, false, false, Append, p => progress.Report(p), ct, SelectedPlatform), ct);
             _status.Text = "完成";
         }
         catch (OperationCanceledException)

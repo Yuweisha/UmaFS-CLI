@@ -1,4 +1,5 @@
 using System.Runtime.InteropServices;
+using UmaFs.Core;
 
 namespace UmaDL;
 
@@ -34,6 +35,7 @@ internal static class Program
         bool dryRun = false, noVerify = false;
         string? proxy = null;
         bool proxySet = false;
+        var platform = GamePlatform.Windows;
 
         for (int i = 0; i < args.Length; i++)
         {
@@ -67,6 +69,17 @@ internal static class Program
                     proxy = ++i < args.Length ? args[i] : null;
                     proxySet = true;
                     break;
+                case "--platform" or "--plat":
+                    if (i + 1 < args.Length)
+                    {
+                        if (!GamePlatformExtensions.TryParse(args[i + 1], out platform))
+                        {
+                            Console.Error.WriteLine($"未知平台: {args[i + 1]}（可用: pc / android / ios）");
+                            return 2;
+                        }
+                        i++;
+                    }
+                    break;
                 default:
                     if (!args[i].StartsWith('-')) group = args[i];
                     break;
@@ -91,7 +104,7 @@ internal static class Program
 
         try
         {
-            return Cli.Run(dest, group, parallel, limit, dryRun, noVerify);
+            return Cli.Run(dest, group, parallel, limit, dryRun, noVerify, platform: platform);
         }
         catch (Exception ex)
         {
@@ -116,6 +129,7 @@ internal static class Program
               -n, --limit <N>      只处理前 N 条
               -p, --proxy <url>    HTTP 代理，如 http://127.0.0.1:7890；--proxy off 强制直连
                                    不指定时读 HTTP_PROXY / HTTPS_PROXY / ALL_PROXY
+                  --platform <名>  pc（默认）/ android / ios
                   --dry-run        只统计不下载
                   --no-verify      跳过 xxHash64 校验
 
@@ -124,6 +138,7 @@ internal static class Program
               umadl DeleteOnLogin -o D:\uma   指定分组与目录
               umadl --all --dry-run           看全部资源需要多少
               umadl -p 127.0.0.1:7890         走本地代理
+              umadl --platform android        下 Android 版资源（默认 pc）
             """);
     }
 }
