@@ -126,6 +126,30 @@ umadl -g DownloadLogin       指定分组
 
 GUI 控件：分组下拉、并发数、目录选择、**代理**、检查清单 / 开始下载 / 停止、进度条、状态栏、日志区。
 
+### 镜像 / 自建 CDN
+
+```bash
+umadl --cdn http://host:8080/dl/resources      # 资源与清单都从这个根取
+umadl --root-api http://host/api/MetaC/root    # root 接口自己指定
+```
+
+镜像目录结构（与官方 CDN 对应）：
+
+```
+<cdn>/
+  Manifest/{前2位}/{hash}              ← 清单（root / 平台 / 41 个分清单）
+  Generic/{前2位}/{hash}               ← 带扩展名的资源（音频/视频/字体）
+  Windows/assetbundles/{前2位}/{hash}  ← PC 资源包
+  Android/assetbundles/{前2位}/{hash}  ← Android 资源包
+```
+
+`umadl` 下载时会把用到的清单**一并写入** `<输出目录>/Manifest/`，这样镜像自给自足。
+
+### 密钥从哪来
+
+清单每条资源的第 7 个字段（8 字节大端）就是解密 key。游戏解析后写进
+`meta` 数据库 `a` 表的 `e` 列。资源包本身**不含**密钥 —— 只抓资源包拿不到 key。
+
 ### 平台切换
 
 默认下 PC（Windows）版资源。Android 与 PC 的清单和资源包都不同，需要显式指定：

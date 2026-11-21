@@ -1,3 +1,4 @@
+using System.Buffers.Binary;
 using System.Net;
 using System.Text;
 using System.Text.Json;
@@ -60,6 +61,9 @@ public sealed class RemoteAsset
     public string Hash { get; init; } = "";
     public int Group { get; init; }
     public string Manifest { get; set; } = "";
+    /// <summary>解密密钥（清单第 7 字段，8 字节大端）。0 表示未加密。</summary>
+    public ulong Key { get; init; }
+    public bool Encrypted => Key != 0;
 }
 
 /// <summary>
@@ -68,14 +72,32 @@ public sealed class RemoteAsset
 /// </summary>
 public sealed class RemoteManifest
 {
-    public const string RootApi = "https://umapi.buenavista.fans:8443/api/MetaC/root";
-    private const string ManifestUrl = "https://prd-storage-app-umamusume.akamaized.net/dl/resources/Manifest";
-    private const string ManifestUrlAlt = "https://prd-storage-game-umamusume.akamaized.net/dl/resources/Manifest";
-    public const string GenericUrl = "https://prd-storage-game-umamusume.akamaized.net/dl/resources/Generic";
+    public const string DefaultRootApi = "https://umapi.buenavista.fans:8443/api/MetaC/root";
+
+    /// <summary>CDN 根地址。默认官方 akamaized；指向自建镜像时形如 http://host:port/dl/resources。</summary>
+    public static string CdnBase { get; set; } = "https://prd-storage-game-umamusume.akamaized.net/dl/resources";
+
+    /// <summary>清单目录的基址（官方在另一台域名上，自建镜像时与 CdnBase 相同）。</summary>
+    public static string ManifestBase { get; set; } = "https://prd-storage-app-umamusume.akamaized.net/dl/resources/Manifest";
+
+    public static string ManifestBaseAlt { get; set; } = "https://prd-storage-game-umamusume.akamaized.net/dl/resources/Manifest";
+
+    public static string RootApi { get; set; } = DefaultRootApi;
+
+    public static string GenericUrl => $"{CdnBase}/Generic";
 
     /// <summary>资源包 CDN 前缀（平台相关）。</summary>
-    public static string AssetBase(GamePlatform p) =>
-        $"https://prd-storage-game-umamusume.akamaized.net/dl/resources/{p.AssetFolder()}/assetbundles";
+    public static string AssetBase(GamePlatform p) => $"{CdnBase}/{p.AssetFolder()}/assetbundles";
+
+    /// <summary>指向自建镜像：所有 URL 都走同一个根（<c>base/manifest</c>、<c>base/Generic</c>、<c>base/&lt;平台&gt;/assetbundles</c>）。</summary>
+    public static void UseMirror(string baseUrl)
+    {
+        string b = baseUrl.TrimEnd('/');
+        CdnBase = b;
+        // 镜像上清单目录名统一用小写 manifest（Windows 大小写不敏感，Linux 需与服务器约定一致）
+        ManifestBase = $"{b}/Manifest";
+        ManifestBaseAlt = $"{b}/Manifest";
+    }
 
     /// <summary>CDN 会按 UA 拦截，必须伪装成 Unity。</summary>
     public const string UserAgent = "UnityPlayer/2022.3.62f1 (UnityWebRequest/1.0, libcurl/7.52.0-DEV)";
@@ -89,6 +111,9 @@ public sealed class RemoteManifest
     public Dictionary<string, string> PlatformHashes { get; } = new();
     public List<RemoteAsset> Assets { get; } = new();
     public List<(string Name, string Error)> Failures { get; } = new();
+
+    /// <summary>本次解析用到的全部清单：hash → 原始 LZ4 frame 字节（游戏原样可读）。</summary>
+    public Dictionary<string, byte[]> RawManifests { get; } = new();
 
     /// <summary>带扩展名的走 Generic，否则走当前平台的 assetbundles（与游戏一致）。</summary>
     public static string UrlFor(RemoteAsset a, GamePlatform platform = GamePlatform.Windows)
@@ -112,7 +137,8 @@ public sealed class RemoteManifest
             ?? throw new InvalidOperationException("root API 返回里没有 h 字段");
         log?.Invoke($"root: {rm.RootHash}");
 
-        var rootRows = await FetchManifestAsync(http, rm.RootHash, ct).ConfigureAwait(false);
+        var (rootRows, rootRaw) = await FetchManifestAsync(http, rm.RootHash, ct).ConfigureAwait(false);
+        rm.RawManifests[rm.RootHash] = rootRaw;
         log?.Invoke($"root 清单: {rootRows.Count} 行（{string.Join(",", rootRows.Select(r => r.Name))}）");
 
         foreach (var r in rootRows) rm.PlatformHashes[r.Name] = r.Hash;
@@ -123,7 +149,8 @@ public sealed class RemoteManifest
             ?? throw new InvalidOperationException(
                 $"root 清单里没有 {want} 平台（现有: {string.Join(", ", rootRows.Select(r => r.Name))}）");
 
-        var platRows = await FetchManifestAsync(http, plat.Hash, ct).ConfigureAwait(false);
+        var (platRows, platRaw) = await FetchManifestAsync(http, plat.Hash, ct).ConfigureAwait(false);
+        rm.RawManifests[plat.Hash] = platRaw;
         log?.Invoke($"{want} 平台清单: {platRows.Count} 个分清单");
 
         var manifests = platRows.Where(r => !r.Name.Equals(want, StringComparison.OrdinalIgnoreCase)).ToList();
@@ -133,7 +160,8 @@ public sealed class RemoteManifest
             ct.ThrowIfCancellationRequested();
             try
             {
-                var rows = await FetchManifestAsync(http, m.Hash, ct).ConfigureAwait(false);
+                var (rows, raw) = await FetchManifestAsync(http, m.Hash, ct).ConfigureAwait(false);
+                rm.RawManifests[m.Hash] = raw;
                 foreach (var r in rows)
                 {
                     r.Manifest = m.Name;
@@ -151,11 +179,12 @@ public sealed class RemoteManifest
         return rm;
     }
 
-    private static async Task<List<RemoteAsset>> FetchManifestAsync(HttpClient http, string hash, CancellationToken ct)
+    private static async Task<(List<RemoteAsset> Rows, byte[] Raw)> FetchManifestAsync(
+        HttpClient http, string hash, CancellationToken ct)
     {
         byte[]? raw = null;
         string? lastError = null;
-        foreach (var b in new[] { ManifestUrl, ManifestUrlAlt })
+        foreach (var b in new[] { ManifestBase, ManifestBaseAlt })
         {
             string url = $"{b}/{hash[..2]}/{hash}";
             try
@@ -175,7 +204,7 @@ public sealed class RemoteManifest
         using var dec = LZ4Stream.Decode(new MemoryStream(raw));
         using var ms = new MemoryStream();
         await dec.CopyToAsync(ms, ct).ConfigureAwait(false);
-        return ParseBsv(ms.ToArray());
+        return (ParseBsv(ms.ToArray()), raw);
     }
 
     // ---------- BSV 解析 ----------
@@ -208,6 +237,7 @@ public sealed class RemoteManifest
             var texts = new List<string>(2);
             var nums = new List<long>(3);
             byte[] checksum = Array.Empty<byte>();
+            ulong key = 0;   // TSkip8 实际是解密密钥（8 字节大端）
 
             foreach (var (t, fix) in schema)
             {
@@ -223,6 +253,9 @@ public sealed class RemoteManifest
                         nums.Add(Vlq(d, ref off));
                         break;
                     case TSkip8:
+                        // 清单第 7 字段：加密 key，大端 8 字节
+                        if (off + 8 <= d.Length)
+                            key = BinaryPrimitives.ReadUInt64BigEndian(d.AsSpan(off, 8));
                         off += 8;
                         break;
                     case TFixed:
@@ -248,7 +281,8 @@ public sealed class RemoteManifest
                 Size = size,
                 Checksum = Convert.ToHexString(checksum).ToLowerInvariant(),
                 Hash = CalcHash(checksum, size, name),
-                Group = (int)group
+                Group = (int)group,
+                Key = key
             });
         }
         return list;

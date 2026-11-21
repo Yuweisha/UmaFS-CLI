@@ -45,6 +45,21 @@ internal static class Cli
             .GetAwaiter().GetResult();
         sw.Stop();
 
+        // 清单也落盘（按 CDN 的 Manifest 目录树），否则拿不到 key、也无法独立重建
+        int mCount = 0;
+        foreach (var kv in rm.RawManifests)
+        {
+            string mdir = Path.Combine(dest, "Manifest", kv.Key[..2]);
+            Directory.CreateDirectory(mdir);
+            string mfile = Path.Combine(mdir, kv.Key);
+            if (!File.Exists(mfile) || new FileInfo(mfile).Length != kv.Value.Length)
+            {
+                File.WriteAllBytes(mfile, kv.Value);
+                mCount++;
+            }
+        }
+        Log($"清单已保存: {rm.RawManifests.Count} 个（新增 {mCount}）→ {Path.Combine(dest, "Manifest")}");
+
         Log("");
         Log($"完成: 下载 {result.Downloaded}，跳过 {result.Skipped}，失败 {result.Failed}" +
             $"（{Human(result.Bytes)}，{sw.Elapsed.TotalSeconds:F0}s）");

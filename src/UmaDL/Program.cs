@@ -36,6 +36,7 @@ internal static class Program
         string? proxy = null;
         bool proxySet = false;
         var platform = GamePlatform.Windows;
+        string? cdn = null, rootApi = null;
 
         for (int i = 0; i < args.Length; i++)
         {
@@ -68,6 +69,12 @@ internal static class Program
                 case "--proxy" or "-p":
                     proxy = ++i < args.Length ? args[i] : null;
                     proxySet = true;
+                    break;
+                case "--cdn":
+                    cdn = ++i < args.Length ? args[i] : null;
+                    break;
+                case "--root-api":
+                    rootApi = ++i < args.Length ? args[i] : null;
                     break;
                 case "--platform" or "--plat":
                     if (i + 1 < args.Length)
@@ -102,6 +109,14 @@ internal static class Program
             return 2;
         }
 
+        if (!string.IsNullOrWhiteSpace(cdn))
+        {
+            UmaFs.Core.RemoteManifest.UseMirror(cdn);
+            Console.WriteLine($"CDN: {UmaFs.Core.RemoteManifest.CdnBase}");
+        }
+        if (!string.IsNullOrWhiteSpace(rootApi))
+            UmaFs.Core.RemoteManifest.RootApi = rootApi;
+
         try
         {
             return Cli.Run(dest, group, parallel, limit, dryRun, noVerify, platform: platform);
@@ -130,6 +145,8 @@ internal static class Program
               -p, --proxy <url>    HTTP 代理，如 http://127.0.0.1:7890；--proxy off 强制直连
                                    不指定时读 HTTP_PROXY / HTTPS_PROXY / ALL_PROXY
                   --platform <名>  pc（默认）/ android / ios
+                  --cdn <url>      CDN 根，如 http://host:8080/dl/resources
+                  --root-api <url> root 接口地址
                   --dry-run        只统计不下载
                   --no-verify      跳过 xxHash64 校验
 
@@ -139,6 +156,8 @@ internal static class Program
               umadl --all --dry-run           看全部资源需要多少
               umadl -p 127.0.0.1:7890         走本地代理
               umadl --platform android        下 Android 版资源（默认 pc）
+              umadl --cdn http://host:8080/dl/resources    从自建镜像取
+              umadl --root-api http://host/api/MetaC/root  自建 root 接口
             """);
     }
 }
