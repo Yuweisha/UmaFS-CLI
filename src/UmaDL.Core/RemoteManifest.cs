@@ -399,7 +399,8 @@ public sealed class AssetDownloader
     public async Task<Result> RunAsync(
         IEnumerable<RemoteAsset> assets, string destDir, bool verify,
         int parallel, Action<string>? log, CancellationToken ct, Action<Progress>? onProgress = null,
-        GamePlatform platform = GamePlatform.Windows, OutputLayout layout = OutputLayout.Cdn)
+        GamePlatform platform = GamePlatform.Windows, OutputLayout layout = OutputLayout.Cdn,
+        bool force = false)
     {
         var result = new Result();
         var gate = new SemaphoreSlim(parallel);
@@ -412,7 +413,7 @@ public sealed class AssetDownloader
             try
             {
                 string dest = UpdatePlan.LocalPath(destDir, layout, a, platform);
-                if (File.Exists(dest) && new FileInfo(dest).Length == a.Size)
+                if (!force && File.Exists(dest) && new FileInfo(dest).Length == a.Size)
                 {
                     lock (okLock) result.Skipped++;
                     return;
@@ -446,7 +447,7 @@ public sealed class AssetDownloader
                 lock (okLock)
                 {
                     result.Failed++;
-                    if (result.Errors.Count < 50) result.Errors.Add((a.Name, ex.Message));
+                    if (result.Errors.Count < 50) result.Errors.Add((a.Name, $"hash={a.Hash}  {ex.Message}"));
                 }
             }
             finally

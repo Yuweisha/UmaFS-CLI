@@ -78,7 +78,7 @@ internal static class Cli
         // 3) 下载资源
         var sw = System.Diagnostics.Stopwatch.StartNew();
         var result = new AssetDownloader()
-            .RunAsync(selected, dest, !noVerify, parallel, s => Log(s), ct, progress, platform, layout)
+            .RunAsync(selected, dest, !noVerify, parallel, s => Log(s), ct, progress, platform, layout, force: full)
             .GetAwaiter().GetResult();
         sw.Stop();
 
