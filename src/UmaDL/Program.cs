@@ -36,6 +36,8 @@ internal static class Program
         string? proxy = null;
         bool proxySet = false;
         var platform = GamePlatform.Windows;
+        var layout = OutputLayout.Cdn;
+        bool full = false, prune = false;
         string? cdn = null, rootApi = null;
 
         for (int i = 0; i < args.Length; i++)
@@ -69,6 +71,23 @@ internal static class Program
                 case "--proxy" or "-p":
                     proxy = ++i < args.Length ? args[i] : null;
                     proxySet = true;
+                    break;
+                case "--layout" or "-L":
+                    if (i + 1 < args.Length)
+                    {
+                        if (!OutputLayoutExtensions.TryParse(args[i + 1], out layout))
+                        {
+                            Console.Error.WriteLine($"未知布局: {args[i + 1]}（可用: cdn / flat）");
+                            return 2;
+                        }
+                        i++;
+                    }
+                    break;
+                case "--full":
+                    full = true;
+                    break;
+                case "--prune":
+                    prune = true;
                     break;
                 case "--cdn":
                     cdn = ++i < args.Length ? args[i] : null;
@@ -119,7 +138,8 @@ internal static class Program
 
         try
         {
-            return Cli.Run(dest, group, parallel, limit, dryRun, noVerify, platform: platform);
+            return Cli.Run(dest, group, parallel, limit, dryRun, noVerify, platform: platform,
+                           layout: layout, full: full, prune: prune);
         }
         catch (Exception ex)
         {
@@ -146,6 +166,9 @@ internal static class Program
                                    不指定时读 HTTP_PROXY / HTTPS_PROXY / ALL_PROXY
                   --platform <名>  pc（默认）/ android / ios
                   --cdn <url>      CDN 根，如 http://host:8080/dl/resources
+              -L, --layout <名>  cdn（默认）/ flat
+                  --full           忽略快照，全量
+                  --prune          删除已移除的资源
                   --root-api <url> root 接口地址
                   --dry-run        只统计不下载
                   --no-verify      跳过 xxHash64 校验
@@ -157,6 +180,9 @@ internal static class Program
               umadl -p 127.0.0.1:7890         走本地代理
               umadl --platform android        下 Android 版资源（默认 pc）
               umadl --cdn http://host:8080/dl/resources    从自建镜像取
+              umadl --layout flat             输出扁平目录（{xx}/{hash}，同游戏 dat）
+              umadl --full                    忽略本地快照，全量重下
+              umadl --prune                   删除云端已移除的资源
               umadl --root-api http://host/api/MetaC/root  自建 root 接口
             """);
     }

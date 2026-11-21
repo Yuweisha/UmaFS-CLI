@@ -126,6 +126,28 @@ umadl -g DownloadLogin       指定分组
 
 GUI 控件：分组下拉、并发数、目录选择、**代理**、检查清单 / 开始下载 / 停止、进度条、状态栏、日志区。
 
+### 增量更新
+
+默认就是增量的：每次运行会读 `<输出目录>/_umadl_state.json` 快照，对比云端清单只下变化的资源。
+
+```
+umadl --platform pc --all -o D:\uma      首次全量；之后只补差量
+umadl --full                             忽略快照，全量重下
+umadl --prune                            同时删除云端已移除的资源文件
+```
+
+输出会报告 `未变 / 更新 / 新增 / 已移除` 四类计数。快照只记录磁盘上真实存在的资源，
+所以中断后用同样命令重跑会接着补。有失败项时不写快照，下次自动重试。
+
+### 输出布局
+
+```
+umadl -L cdn      # 默认：Manifest/ Generic/ <平台>/assetbundles/
+umadl -L flat     # 扁平：全部 {hash前2位}/{hash}，与游戏 Persistent/dat 一致
+```
+
+GUI 第一行有「布局」下拉框，以及「全量」「清理旧文件」两个勾选项。
+
 ### 镜像 / 自建 CDN
 
 ```bash

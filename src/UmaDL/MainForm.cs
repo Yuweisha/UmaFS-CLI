@@ -7,6 +7,9 @@ internal sealed class MainForm : Form
 {
     private readonly ComboBox _groupBox = new() { DropDownStyle = ComboBoxStyle.DropDownList, Width = 210 };
     private readonly ComboBox _platBox = new() { DropDownStyle = ComboBoxStyle.DropDownList, Width = 96 };
+    private readonly ComboBox _layoutBox = new() { DropDownStyle = ComboBoxStyle.DropDownList, Width = 110 };
+    private readonly CheckBox _fullChk = new() { Text = "全量", Width = 60, Height = 22 };
+    private readonly CheckBox _pruneChk = new() { Text = "清理旧文件", Width = 100, Height = 22 };
     private readonly TextBox _destBox = new() { Width = 520 };
     private readonly NumericUpDown _parallelBox = new() { Minimum = 1, Maximum = 64, Value = 8, Width = 60 };
     private readonly Button _browseBtn = new() { Text = "…", Width = 30 };
@@ -50,6 +53,8 @@ internal sealed class MainForm : Form
 
         _platBox.Items.AddRange(new object[] { "PC", "Android", "iOS" });
         _platBox.SelectedIndex = 0;
+        _layoutBox.Items.AddRange(new object[] { "CDN 目录树", "扁平目录" });
+        _layoutBox.SelectedIndex = 0;
 
         foreach (var g in Groups) _groupBox.Items.Add(g.Label);
         _groupBox.SelectedIndex = 0;
@@ -61,8 +66,12 @@ internal sealed class MainForm : Form
         top.Controls.Add(_groupBox);
         top.Controls.Add(new Label { Text = "平台", Width = 34, Height = 22, TextAlign = ContentAlignment.MiddleLeft });
         top.Controls.Add(_platBox);
+        top.Controls.Add(new Label { Text = "布局", Width = 34, Height = 22, TextAlign = ContentAlignment.MiddleLeft });
+        top.Controls.Add(_layoutBox);
         top.Controls.Add(new Label { Text = "并发", Width = 34, Height = 22, TextAlign = ContentAlignment.MiddleLeft });
         top.Controls.Add(_parallelBox);
+        top.Controls.Add(_fullChk);
+        top.Controls.Add(_pruneChk);
 
         var mid = new FlowLayoutPanel { Left = 16, Top = 92, Width = 668, Height = 32, Anchor = AnchorStyles.Top | AnchorStyles.Left | AnchorStyles.Right };
         mid.Controls.Add(new Label { Text = "目录", Width = 34, Height = 22, TextAlign = ContentAlignment.MiddleLeft });
@@ -201,6 +210,9 @@ internal sealed class MainForm : Form
         if (dlg.ShowDialog(this) == DialogResult.OK) _destBox.Text = dlg.SelectedPath;
     }
 
+    private OutputLayout SelectedLayout =>
+        _layoutBox.SelectedIndex == 1 ? OutputLayout.Flat : OutputLayout.Cdn;
+
     private GamePlatform SelectedPlatform => _platBox.SelectedIndex switch
     {
         1 => GamePlatform.Android,
@@ -274,7 +286,8 @@ internal sealed class MainForm : Form
 
         try
         {
-            await Task.Run(() => Cli.Run(dest, group, parallel, 0, false, false, Append, p => progress.Report(p), ct, SelectedPlatform), ct);
+            await Task.Run(() => Cli.Run(dest, group, parallel, 0, false, false, Append, p => progress.Report(p), ct,
+                SelectedPlatform, SelectedLayout, _fullChk.Checked, _pruneChk.Checked), ct);
             _status.Text = "完成";
         }
         catch (OperationCanceledException)
