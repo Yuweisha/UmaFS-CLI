@@ -28,8 +28,8 @@ internal static class Program
         if (!AttachConsole(-1)) AllocConsole();
         try { Console.OutputEncoding = System.Text.Encoding.UTF8; } catch { }
 
-        string dest = Path.Combine(
-            Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "UmaFs", "assets");
+        // 默认下载到 exe 所在目录，便于整个文件夹整体搬迁/分发
+        string dest = AppContext.BaseDirectory.TrimEnd(Path.DirectorySeparatorChar);
         string? group = "DeleteOnLogin";
         int parallel = 8, limit = 0;
         bool dryRun = false, noVerify = false;
@@ -38,7 +38,7 @@ internal static class Program
         var platform = GamePlatform.Windows;
         var layout = OutputLayout.Cdn;
         bool full = false, prune = false;
-        string? cdn = null, rootApi = null;
+        string? cdn = null, rootApi = null, rv = null;
 
         for (int i = 0; i < args.Length; i++)
         {
@@ -88,6 +88,9 @@ internal static class Program
                     break;
                 case "--prune":
                     prune = true;
+                    break;
+                case "--rv" or "--resource-version":
+                    rv = ++i < args.Length ? args[i] : null;
                     break;
                 case "--cdn":
                     cdn = ++i < args.Length ? args[i] : null;
@@ -139,7 +142,7 @@ internal static class Program
         try
         {
             return Cli.Run(dest, group, parallel, limit, dryRun, noVerify, platform: platform,
-                           layout: layout, full: full, prune: prune);
+                           layout: layout, full: full, prune: prune, resourceVersion: rv);
         }
         catch (Exception ex)
         {
@@ -165,6 +168,7 @@ internal static class Program
               -p, --proxy <url>    HTTP 代理，如 http://127.0.0.1:7890；--proxy off 强制直连
                                    不指定时读 HTTP_PROXY / HTTPS_PROXY / ALL_PROXY
                   --platform <名>  pc（默认）/ android / ios
+                  --rv <值>        start_session 的 resource_version，直接推导根清单
                   --cdn <url>      CDN 根，如 http://host:8080/dl/resources
               -L, --layout <名>  cdn（默认）/ flat
                   --full           忽略快照，全量
@@ -180,6 +184,7 @@ internal static class Program
               umadl -p 127.0.0.1:7890         走本地代理
               umadl --platform android        下 Android 版资源（默认 pc）
               umadl --cdn http://host:8080/dl/resources    从自建镜像取
+              umadl --rv "10021450:TZH99sxhsgYr"   由 resource_version 推导根清单，不问 API
               umadl --layout flat             输出扁平目录（{xx}/{hash}，同游戏 dat）
               umadl --full                    忽略本地快照，全量重下
               umadl --prune                   删除云端已移除的资源

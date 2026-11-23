@@ -8,12 +8,25 @@ internal static class Cli
     public static int Run(string dest, string? group, int parallel, int limit, bool dryRun, bool noVerify,
                           Action<string>? log = null, Action<AssetDownloader.Progress>? progress = null,
                           CancellationToken ct = default, GamePlatform platform = GamePlatform.Windows,
-                          OutputLayout layout = OutputLayout.Cdn, bool full = false, bool prune = false)
+                          OutputLayout layout = OutputLayout.Cdn, bool full = false, bool prune = false,
+                          string? resourceVersion = null)
     {
         void Log(string s) => (log ?? Console.WriteLine)(s);
 
-        Log("读取云端清单…");
-        var rm = RemoteManifest.FetchAsync(platform, s => Log("  " + s), ct).GetAwaiter().GetResult();
+        string? derivedRoot = null;
+        if (!string.IsNullOrWhiteSpace(resourceVersion))
+        {
+            derivedRoot = RemoteManifest.DeriveRootHash(resourceVersion);
+            Log($"resource_version: {resourceVersion}");
+            Log($"  推导根清单: {derivedRoot}");
+        }
+        else
+        {
+            Log("读取云端清单…");
+        }
+
+        var rm = RemoteManifest.FetchAsync(platform, s => Log("  " + s), ct, derivedRoot, resourceVersion)
+            .GetAwaiter().GetResult();
         Log($"平台: {platform.ManifestName()}   清单就绪: {rm.Assets.Count} 条（失败分清单 {rm.Failures.Count}）");
 
         var local = full ? new DownloadState() : DownloadState.Load(dest);

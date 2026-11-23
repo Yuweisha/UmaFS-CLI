@@ -13,6 +13,7 @@ internal sealed class MainForm : Form
     private readonly TextBox _destBox = new() { Width = 520 };
     private readonly NumericUpDown _parallelBox = new() { Minimum = 1, Maximum = 64, Value = 8, Width = 60 };
     private readonly Button _browseBtn = new() { Text = "…", Width = 30 };
+    private readonly TextBox _rvBox = new() { Width = 460 };
     private readonly TextBox _proxyBox = new() { Width = 300 };
     private readonly CheckBox _proxyChk = new() { Text = "使用代理", Width = 90, Height = 22, Checked = false };
     private readonly Button _proxyTestBtn = new() { Text = "测试", Width = 60 };
@@ -46,8 +47,8 @@ internal sealed class MainForm : Form
     public MainForm()
     {
         Text = "UmaDL — 赛马娘资源下载器";
-        ClientSize = new Size(700, 600);
-        MinimumSize = new Size(700, 600);
+        ClientSize = new Size(700, 640);
+        MinimumSize = new Size(700, 640);
         FormBorderStyle = FormBorderStyle.Sizable;
         StartPosition = FormStartPosition.CenterScreen;
 
@@ -58,8 +59,7 @@ internal sealed class MainForm : Form
 
         foreach (var g in Groups) _groupBox.Items.Add(g.Label);
         _groupBox.SelectedIndex = 0;
-        _destBox.Text = Path.Combine(
-            Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "UmaFs", "assets");
+        _destBox.Text = AppContext.BaseDirectory.TrimEnd(Path.DirectorySeparatorChar);
 
         var top = new FlowLayoutPanel { Left = 16, Top = 12, Width = 668, Height = 76, WrapContents = true, Anchor = AnchorStyles.Top | AnchorStyles.Left | AnchorStyles.Right };
         top.Controls.Add(new Label { Text = "分组", Width = 34, Height = 22, TextAlign = ContentAlignment.MiddleLeft });
@@ -78,26 +78,30 @@ internal sealed class MainForm : Form
         mid.Controls.Add(_destBox);
         mid.Controls.Add(_browseBtn);
 
-        var proxyRow = new FlowLayoutPanel { Left = 16, Top = 130, Width = 668, Height = 32, Anchor = AnchorStyles.Top | AnchorStyles.Left | AnchorStyles.Right };
+        var rvRow = new FlowLayoutPanel { Left = 16, Top = 130, Width = 668, Height = 32, Anchor = AnchorStyles.Top | AnchorStyles.Left | AnchorStyles.Right };
+        rvRow.Controls.Add(new Label { Text = "资源代号", Width = 64, Height = 22, TextAlign = ContentAlignment.MiddleLeft });
+        rvRow.Controls.Add(_rvBox);
+
+        var proxyRow = new FlowLayoutPanel { Left = 16, Top = 168, Width = 668, Height = 32, Anchor = AnchorStyles.Top | AnchorStyles.Left | AnchorStyles.Right };
         proxyRow.Controls.Add(new Label { Text = "代理", Width = 34, Height = 22, TextAlign = ContentAlignment.MiddleLeft });
         proxyRow.Controls.Add(_proxyBox);
         proxyRow.Controls.Add(_proxyChk);
         proxyRow.Controls.Add(_proxyTestBtn);
 
-        var buttons = new FlowLayoutPanel { Left = 16, Top = 168, Width = 668, Height = 34, Anchor = AnchorStyles.Top | AnchorStyles.Left | AnchorStyles.Right };
+        var buttons = new FlowLayoutPanel { Left = 16, Top = 206, Width = 668, Height = 34, Anchor = AnchorStyles.Top | AnchorStyles.Left | AnchorStyles.Right };
         buttons.Controls.Add(_checkBtn);
         buttons.Controls.Add(_startBtn);
         buttons.Controls.Add(_stopBtn);
 
-        _bar.Left = 16; _bar.Top = 212;
+        _bar.Left = 16; _bar.Top = 250;
         _bar.Width = 668;
-        _status.Left = 16; _status.Top = 240;
-        int logH = ClientSize.Height - 268 - 40;
-        _log.Left = 16; _log.Top = 268; _log.Width = 668; _log.Height = logH;
+        _status.Left = 16; _status.Top = 278;
+        int logH = ClientSize.Height - 306 - 40;
+        _log.Left = 16; _log.Top = 306; _log.Width = 668; _log.Height = logH;
         _log.Anchor = AnchorStyles.Top | AnchorStyles.Bottom | AnchorStyles.Left | AnchorStyles.Right;
         _log.WordWrap = false;
 
-        Controls.AddRange(new Control[] { top, mid, proxyRow, buttons, _bar, _status, _log });
+        Controls.AddRange(new Control[] { top, mid, rvRow, proxyRow, buttons, _bar, _status, _log });
 
         _browseBtn.Click += (_, _) => Browse();
         _proxyTestBtn.Click += async (_, _) => await TestProxyAsync();
@@ -235,7 +239,14 @@ internal sealed class MainForm : Form
         try
         {
             var ct = _cts.Token;
-            _manifest = await Task.Run(() => RemoteManifest.FetchAsync(SelectedPlatform, Append, ct), ct);
+            string? rv = string.IsNullOrWhiteSpace(_rvBox.Text) ? null : _rvBox.Text.Trim();
+            string? derived = null;
+            if (rv is not null)
+            {
+                derived = RemoteManifest.DeriveRootHash(rv);
+                Append($"由 resource_version 推导根清单: {derived}");
+            }
+            _manifest = await Task.Run(() => RemoteManifest.FetchAsync(SelectedPlatform, Append, ct, derived, rv), ct);
             Append($"清单就绪: {_manifest.Assets.Count} 条，失败分清单 {_manifest.Failures.Count}");
 
             var g = SelectedGroup;
@@ -287,7 +298,8 @@ internal sealed class MainForm : Form
         try
         {
             await Task.Run(() => Cli.Run(dest, group, parallel, 0, false, false, Append, p => progress.Report(p), ct,
-                SelectedPlatform, SelectedLayout, _fullChk.Checked, _pruneChk.Checked), ct);
+                SelectedPlatform, SelectedLayout, _fullChk.Checked, _pruneChk.Checked,
+                string.IsNullOrWhiteSpace(_rvBox.Text) ? null : _rvBox.Text.Trim()), ct);
             _status.Text = "完成";
         }
         catch (OperationCanceledException)

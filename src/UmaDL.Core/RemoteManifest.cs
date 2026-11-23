@@ -102,10 +102,55 @@ public sealed class RemoteManifest
     /// <summary>CDN 会按 UA 拦截，必须伪装成 Unity。</summary>
     public const string UserAgent = "UnityPlayer/2022.3.62f1 (UnityWebRequest/1.0, libcurl/7.52.0-DEV)";
 
+    /// <summary>
+    /// 从 start_session 的 resource_version 推导根清单 hash，不需要问 API。
+    ///
+    /// 格式 "<版本号>:<base64>"，后半段解码后是 BSV 行体：
+    ///   VLQ(size) + 8 字节 checksum
+    /// 然后 hash = Base32(SHA1(checksum_be8 + size_be8 + "root"))。
+    /// </summary>
+    public static string DeriveRootHash(string resourceVersion)
+    {
+        if (string.IsNullOrWhiteSpace(resourceVersion))
+            throw new ArgumentException("resource_version 为空");
+
+        int colon = resourceVersion.IndexOf(':');
+        if (colon <= 0 || colon == resourceVersion.Length - 1)
+            throw new ArgumentException($"resource_version 格式应为 <版本号>:<签名>，实际: {resourceVersion}");
+
+        string sig = resourceVersion[(colon + 1)..].Trim()
+            .Replace('-', '+').Replace('_', '/');
+        int pad = (4 - sig.Length % 4) % 4;
+        if (pad > 0) sig += new string('=', pad);
+
+        byte[] raw;
+        try { raw = Convert.FromBase64String(sig); }
+        catch (FormatException) { throw new ArgumentException($"resource_version 签名不是合法 base64: {resourceVersion}"); }
+
+        if (raw.Length < 9)
+            throw new ArgumentException($"resource_version 签名解码后只有 {raw.Length} 字节，至少需要 9");
+
+        int i = 0;
+        long size = 0;
+        while (i < raw.Length)
+        {
+            byte b = raw[i++];
+            size = (size << 7) | (uint)(b & 0x7F);
+            if ((b & 0x80) == 0) break;
+        }
+        if (i + 8 > raw.Length)
+            throw new ArgumentException("resource_version 里读不出 8 字节 checksum");
+
+        byte[] cs = raw[i..(i + 8)];
+        return CalcHash(cs, size, "root");
+    }
+
     // 客户端按当前代理设置现建，代理变更后无需重启
     private static HttpClient NewClient(int conns = 16) => Net.CreateClient(conns);
 
     public string RootHash { get; private set; } = "";
+    /// <summary>推导出根 hash 的那个 resource_version（若使用了推导）。</summary>
+    public string? ResourceVersion { get; private set; }
     public GamePlatform Platform { get; private set; } = GamePlatform.Windows;
     /// <summary>各平台的平台清单 hash，便于诊断。</summary>
     public Dictionary<string, string> PlatformHashes { get; } = new();
@@ -126,16 +171,26 @@ public sealed class RemoteManifest
     }
 
     public static async Task<RemoteManifest> FetchAsync(GamePlatform platform = GamePlatform.Windows,
-        Action<string>? log = null, CancellationToken ct = default)
+        Action<string>? log = null, CancellationToken ct = default, string? rootHashOverride = null,
+        string? resourceVersion = null)
     {
         var rm = new RemoteManifest { Platform = platform };
         using var http = NewClient();
 
-        string payload = await http.GetStringAsync(RootApi, ct).ConfigureAwait(false);
-        var node = JsonNode.Parse(payload);
-        rm.RootHash = node?["h"]?.GetValue<string>()
-            ?? throw new InvalidOperationException("root API 返回里没有 h 字段");
-        log?.Invoke($"root: {rm.RootHash}");
+        if (!string.IsNullOrWhiteSpace(rootHashOverride))
+        {
+            rm.RootHash = rootHashOverride.Trim();
+            rm.ResourceVersion = resourceVersion;
+            log?.Invoke($"root: {rm.RootHash}（由 resource_version 推导）");
+        }
+        else
+        {
+            string payload = await http.GetStringAsync(RootApi, ct).ConfigureAwait(false);
+            var node = JsonNode.Parse(payload);
+            rm.RootHash = node?["h"]?.GetValue<string>()
+                ?? throw new InvalidOperationException("root API 返回里没有 h 字段");
+            log?.Invoke($"root: {rm.RootHash}");
+        }
 
         var (rootRows, rootRaw) = await FetchManifestAsync(http, rm.RootHash, ct).ConfigureAwait(false);
         rm.RawManifests[rm.RootHash] = rootRaw;

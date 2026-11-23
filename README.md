@@ -126,6 +126,36 @@ umadl -g DownloadLogin       指定分组
 
 GUI 控件：分组下拉、并发数、目录选择、**代理**、检查清单 / 开始下载 / 停止、进度条、状态栏、日志区。
 
+### 用 resource_version 推导根清单
+
+不依赖 root API，直接用 `start_session` 返回的 `resource_version` 算出根清单 hash：
+
+```
+umadl --rv "10021450:TZH99sxhsgYr" --platform pc --all
+```
+
+```
+resource_version: 10021450:TZH99sxhsgYr
+  推导根清单: 7RFTYUPGQLGCONV3YBUA3KTCBCF7T4EB
+  root: 7RFTYUPGQLGCONV3YBUA3KTCBCF7T4EB（由 resource_version 推导）
+```
+
+算法（与游戏一致）：
+
+```
+"<版本号>:<base64>"
+  → 取冒号后半段，base64 解码得到 9 字节
+  → 前段 VLQ 读出 size，后 8 字节是 checksum
+  → Base32(SHA1(checksum_be8 + size_be8 + "root"))
+```
+
+GUI 的「资源代号」输入框填同样的值即可。
+
+### 默认输出目录
+
+不指定 `-o` 时下载到 **exe 所在目录**，便于整个文件夹搬迁或打包分发。
+（旧版是 `%LOCALAPPDATA%\UmaFs\assets`。）
+
 ### 增量更新
 
 默认就是增量的：每次运行会读 `<输出目录>/_umadl_state.json` 快照，对比云端清单只下变化的资源。
